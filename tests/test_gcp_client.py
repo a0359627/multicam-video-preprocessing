@@ -206,6 +206,26 @@ class TestGcpClient(unittest.TestCase):
         self.assertEqual(merged[4][0], "42:51.900")
         self.assertEqual(merged[4][1], "53:09.500")
 
+    @patch("modules.video_composer.subprocess.run")
+    def test_cut_single_clip_zero_offset_stream_copy_and_hwaccel(self, mock_run):
+        from unittest.mock import MagicMock
+        from modules.video_composer import cut_single_clip
+        mock_run.return_value = MagicMock(returncode=0, stderr="")
+
+        # Case 1: start_sec == 0.0 -> automatic lossless stream copy (-c copy)
+        cut_single_clip("cam1.mp4", "cam1_synced.mp4", start_sec=0.0, end_sec=600.0, copy_codec=False)
+        cmd_zero = mock_run.call_args_list[-1][0][0]
+        self.assertIn("-c", cmd_zero)
+        self.assertIn("copy", cmd_zero)
+        self.assertNotIn("-hwaccel", cmd_zero)
+
+        # Case 2: start_sec > 0.001 -> hardware decode (-hwaccel videotoolbox) + re-encode (h264_videotoolbox)
+        cut_single_clip("cam2.mp4", "cam2_synced.mp4", start_sec=4.32, end_sec=604.32, copy_codec=False)
+        cmd_offset = mock_run.call_args_list[-1][0][0]
+        self.assertIn("-hwaccel", cmd_offset)
+        self.assertIn("videotoolbox", cmd_offset)
+        self.assertIn("h264_videotoolbox", cmd_offset)
+
 
 if __name__ == "__main__":
     unittest.main()

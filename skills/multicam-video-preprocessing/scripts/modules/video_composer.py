@@ -110,8 +110,8 @@ def compose_multicam_video(video_paths, output_path,
                            draw_labels=True):
     """
     Compose 2 to 6+ synchronized camera videos into a single multi-in-one grid video.
-    Uses short GOP (-g 10), 10 fps, 16 kHz mono audio, and +faststart MOOV index placement
-    for fast random seeking in Vertex AI Agentic Video Understanding.
+    Uses hardware decoding (-hwaccel videotoolbox), short GOP (-g 10), 10 fps,
+    16 kHz mono audio, and +faststart MOOV index placement.
     """
     if len(video_paths) == 0:
         return 0.0
@@ -119,10 +119,12 @@ def compose_multicam_video(video_paths, output_path,
     t0 = time.time()
     num_inputs = len(video_paths)
 
-    def _build_cmd(use_drawtext, enc):
+    def _build_cmd(use_drawtext, enc, use_hwaccel=True):
         fc = generate_grid_filter_complex(num_inputs, draw_labels=use_drawtext)
         c = ["ffmpeg", "-y"]
         for vp in video_paths:
+            if use_hwaccel and enc == "h264_videotoolbox":
+                c.extend(["-hwaccel", "videotoolbox"])
             c.extend(["-i", vp])
         c.extend([
             "-filter_complex", fc,
@@ -147,22 +149,26 @@ def compose_multicam_video(video_paths, output_path,
         ])
         return c
 
-    cmd = _build_cmd(draw_labels, encoder)
+    cmd = _build_cmd(draw_labels, encoder, use_hwaccel=True)
 
-    with LiveTicker(f"Composing multi-in-one grid ({num_inputs} cameras → {os.path.basename(output_path)})"):
+    with LiveTicker(f"Stage 1 Step 4/4: Composing multi-in-one grid ({num_inputs} cameras → {os.path.basename(output_path)})"):
         res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0 and encoder == "h264_videotoolbox":
+            # Retry without hwaccel if input codec is unsupported by videotoolbox decoder
+            cmd = _build_cmd(draw_labels, encoder, use_hwaccel=False)
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
             # Fallback 1: retry without drawtext if drawtext caused the failure
             if draw_labels:
-                cmd = _build_cmd(False, encoder)
+                cmd = _build_cmd(False, encoder, use_hwaccel=False)
                 res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
             # Fallback 2: retry with libx264 software encoder if hardware encoder failed
             if res.returncode != 0 and encoder != "libx264":
-                cmd = _build_cmd(draw_labels, "libx264")
+                cmd = _build_cmd(draw_labels, "libx264", use_hwaccel=False)
                 res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
                 if res.returncode != 0 and draw_labels:
-                    cmd = _build_cmd(False, "libx264")
+                    cmd = _build_cmd(False, "libx264", use_hwaccel=False)
                     res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
             if res.returncode != 0:
@@ -178,17 +184,24 @@ def cut_single_clip(video_path, output_path, start_sec, end_sec,
                     encoder="h264_videotoolbox"):
     """
     Cut video sub-clip with frame-accurate synchronization:
-    - If copy_codec=True: stream-copy (-c copy) for fast keyframe-snapped cutting.
-    - If copy_codec=False (default): frame-accurate re-encoding (h264_videotoolbox / libx264)
-      ensuring 0.000s sub-frame alignment without keyframe skipping or freeze frames.
+    - If copy_codec=True OR start_sec <= 0.001s (zero-offset anchor camera starting at IDR frame 0):
+      uses lossless video stream-copy (-c:v copy) for instant export without re-encoding.
+    - If copy_codec=False and start_sec > 0.001s: uses hardware-decoded (-hwaccel videotoolbox) and
+      hardware-encoded (h264_videotoolbox / libx264) frame-accurate cutting to prevent keyframe drift.
     - If norm_audio_path is provided: muxes synchronized video with EBU R128 normalized audio.
     """
     if start_sec < 0:
         start_sec = 0.0
     dur_sec = max(0.0, end_sec - start_sec)
 
-    def _build_cmd(use_copy, enc):
+    # Optimization 1: When start_sec == 0.0, frame 0 is already an IDR keyframe; stream-copy is 100% frame-accurate.
+    effective_copy = bool(copy_codec or start_sec <= 1e-3)
+
+    def _build_cmd(use_copy, enc, use_hwaccel=True):
         c = ["ffmpeg", "-y"]
+        if not use_copy and use_hwaccel and enc == "h264_videotoolbox":
+            c.extend(["-hwaccel", "videotoolbox"])
+
         if norm_audio_path and os.path.exists(norm_audio_path):
             c.extend([
                 "-ss", format_seconds(start_sec),
@@ -200,13 +213,13 @@ def cut_single_clip(video_path, output_path, start_sec, end_sec,
                 "-map", "1:a:0"
             ])
             if use_copy:
-                c.extend(["-c", "copy"])
+                c.extend(["-c", "copy", "-movflags", "+faststart"])
             else:
                 if enc == "h264_videotoolbox":
                     c.extend(["-c:v", enc, "-b:v", video_bitrate, "-pix_fmt", "yuv420p"])
                 else:
                     c.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
-                c.extend(["-c:a", "copy"])
+                c.extend(["-c:a", "copy", "-movflags", "+faststart"])
         else:
             c.extend([
                 "-ss", format_seconds(start_sec),
@@ -214,24 +227,30 @@ def cut_single_clip(video_path, output_path, start_sec, end_sec,
                 "-t", format_seconds(dur_sec)
             ])
             if use_copy:
-                c.extend(["-c", "copy"])
+                c.extend(["-c", "copy", "-movflags", "+faststart"])
             else:
                 if enc == "h264_videotoolbox":
                     c.extend(["-c:v", enc, "-b:v", video_bitrate, "-pix_fmt", "yuv420p"])
                 else:
                     c.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
-                c.extend(["-c:a", "aac", "-b:a", audio_bitrate])
+                c.extend(["-c:a", "aac", "-b:a", audio_bitrate, "-movflags", "+faststart"])
         c.append(output_path)
         return c
 
-    cmd = _build_cmd(copy_codec, encoder)
+    cmd = _build_cmd(effective_copy, encoder, use_hwaccel=True)
     t0 = time.time()
     res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
     if res.returncode != 0:
-        # Fallback to libx264 if hardware encoder failed
-        if not copy_codec and encoder != "libx264":
-            cmd = _build_cmd(False, "libx264")
+        # Retry without hwaccel or fallback from zero-offset stream copy to re-encode if container mux failed
+        if effective_copy and not copy_codec:
+            cmd = _build_cmd(False, encoder, use_hwaccel=True)
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0 and not copy_codec:
+            cmd = _build_cmd(False, encoder, use_hwaccel=False)
+            res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0 and not copy_codec and encoder != "libx264":
+            cmd = _build_cmd(False, "libx264", use_hwaccel=False)
             res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
 
         if res.returncode != 0:

@@ -278,24 +278,35 @@ def cut_segment_stream_copy(input_path, output_path, start_sec, end_sec):
 def cut_segment_reencode(input_path, output_path, start_sec, end_sec,
                          encoder="h264_videotoolbox", video_bitrate="8000k", audio_bitrate="192k"):
     """
-    Extract a segment using frame-accurate hardware-accelerated re-encoding with fast input seeking.
+    Extract a segment using frame-accurate hardware-accelerated decoding and re-encoding with fast input seeking.
     """
     dur_sec = max(0.001, end_sec - start_sec)
-    cmd = [
-        "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", format_seconds(start_sec),
-        "-i", input_path,
-        "-t", format_seconds(dur_sec),
-        "-c:v", encoder,
-        "-b:v", video_bitrate,
-        "-c:a", "aac",
-        "-b:a", audio_bitrate,
-        output_path
-    ]
+
+    def _build_cmd(enc, use_hwaccel=True):
+        c = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y"]
+        if use_hwaccel and enc == "h264_videotoolbox":
+            c.extend(["-hwaccel", "videotoolbox"])
+        c.extend([
+            "-ss", format_seconds(start_sec),
+            "-i", input_path,
+            "-t", format_seconds(dur_sec),
+            "-c:v", enc,
+            "-b:v", video_bitrate,
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-b:a", audio_bitrate,
+            output_path
+        ])
+        return c
+
+    cmd = _build_cmd(encoder, use_hwaccel=True)
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    if res.returncode != 0 and encoder == "h264_videotoolbox":
+        cmd = _build_cmd(encoder, use_hwaccel=False)
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
         if encoder != "libx264":
-            cmd[cmd.index(encoder)] = "libx264"
+            cmd = _build_cmd("libx264", use_hwaccel=False)
             res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         if res.returncode != 0:
             raise RuntimeError(f"Re-encode cut failed: {res.stderr}")

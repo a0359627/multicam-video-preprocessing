@@ -290,25 +290,27 @@ def main():
                 "name": r["target_basename"]
             })
 
-        mode_str = "Lossless Stream Copy (-c copy)" if args.stream_copy else f"Frame-Accurate Re-encode ({args.encoder})"
+        mode_str = "Lossless Stream Copy (-c copy)" if args.stream_copy else f"Hybrid Zero-Offset Copy + HW Re-encode ({args.encoder})"
         t_masters_start = time.time()
 
         def _export_single_task(stask):
             t_s_0 = time.time()
+            is_zero_offset = bool(args.stream_copy or stask["start"] <= 1e-3)
+            task_mode = "Zero-Offset Stream Copy (-c:v copy)" if is_zero_offset else f"Frame-Accurate Re-encode ({args.encoder})"
             cut_single_clip(
                 stask["video"], stask["output"], stask["start"], stask["end"],
                 norm_audio_path=stask["audio"], copy_codec=args.stream_copy,
                 video_bitrate=args.video_bitrate, audio_bitrate=args.audio_bitrate,
                 encoder=args.encoder
             )
-            return stask["name"], os.path.basename(stask["output"]), time.time() - t_s_0
+            return stask["name"], os.path.basename(stask["output"]), time.time() - t_s_0, task_mode
 
         with LiveTicker(f"Stage 1 Step 3/4: Exporting {total_cams} synchronized camera masters [{mode_str}]"):
             with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(export_tasks), args.workers)) as executor:
                 e_futures = [executor.submit(_export_single_task, st) for st in export_tasks]
                 for fut in concurrent.futures.as_completed(e_futures):
-                    src_name, dst_name, dur = fut.result()
-                    print(f"    ✓ Sliced {src_name} → {dst_name} ({dur:.1f}s)", flush=True)
+                    src_name, dst_name, dur, task_mode = fut.result()
+                    print(f"    ✓ Sliced {src_name} → {dst_name} ({dur:.1f}s) [{task_mode}]", flush=True)
 
         print(f"  ✓ All synchronized camera masters exported in {time.time() - t_masters_start:.1f}s!", flush=True)
 
