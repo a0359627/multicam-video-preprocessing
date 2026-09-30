@@ -17,8 +17,10 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 3. **Fail-Fast & Exit Gate Verification**:
    - If any script exits with a non-zero status (e.g., missing ADC credentials, 403/401 GCS/Vertex AI permission error, or `--strict-edl` validation failure), stop immediately, report the exact error, and instruct the user to run `./setup.sh --project YOUR_PROJECT_ID` or `gcloud auth application-default login`.
    - Never declare completion until all required stage output files exist on disk and are non-empty (`> 0 bytes`).
-4. **Dynamic Language Mirroring**:
+4. **Dynamic Language Mirroring, Live Progress Updates & Proactive MP4 Render Offer**:
    - Detect and respond in the user's prompt language (Traditional Chinese `zh-TW` by default when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.) and pass the corresponding `--lang` parameter to CLI scripts.
+   - Pass `NotificationTimeoutSeconds=60` on `run_command` for long-running stages (`multicam_pipeline.py`, `generate_edl.py`, `edl_to_video.py`). Whenever a command is still running after 60s, report the latest `[Stage N - Step X/Y]` progress to the user and schedule a 60s follow-up check (`TimerCondition="<task-id>"`).
+   - When finishing at **Stage 3A (`final_cut_full.xml`)**, always explicitly inform the user that you can also render a directly playable multi-camera rough-cut video (`final_cut_full.mp4`) via **Stage 3B (`edl_to_video.py`)** upon request.
 
 ---
 

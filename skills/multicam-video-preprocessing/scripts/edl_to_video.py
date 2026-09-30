@@ -422,8 +422,10 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
 
     print(f"  ℹ️  Estimated Total Output Duration: {format_seconds(total_duration)} ({total_duration:.2f}s)\n")
 
+    from modules.progress import LiveTicker
+
     # Step 1: Extract all segments in parallel
-    print(f"[Step 1/2] ✂️  Extracting {total_segments} video segments...")
+    print(f"[Stage 3B - Step 1/2] ✂️  Extracting {total_segments} video segments...", flush=True)
     seg_outputs = [None] * total_segments
 
     def _process_single_segment(task):
@@ -445,7 +447,7 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
             try:
                 cut_segment_stream_copy(src, dst, s, e)
             except Exception as stream_err:
-                print(f"    [Fallback] Segment #{idx} stream-copy failed ({stream_err}), falling back to re-encode...")
+                print(f"    [Fallback] Segment #{idx} stream-copy failed ({stream_err}), falling back to re-encode...", flush=True)
                 cut_segment_reencode(
                     src, dst, s, e, encoder=encoder,
                     video_bitrate=video_bitrate, audio_bitrate=audio_bitrate
@@ -454,20 +456,22 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
         elapsed = time.time() - t_start
         return idx, dst, cam, s, e, elapsed, rule_desc
 
-    with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_process_single_segment, task): task for task in resolved_tasks}
-        completed_count = 0
-        for future in as_completed(futures):
-            idx, dst, cam, s, e, elapsed, rule_desc = future.result()
-            seg_outputs[idx - 1] = dst
-            completed_count += 1
-            progress_pct = (completed_count / total_segments) * 100
-            print(f"  [{completed_count:02d}/{total_segments:02d} ({progress_pct:4.0f}%)] Cut #{idx:02d} | {cam} ({format_seconds(s)} → {format_seconds(e)}) [{elapsed:.2f}s]{rule_desc}")
+    with LiveTicker(f"Stage 3B Step 1/2: Extracting {total_segments} rough-cut segments"):
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            futures = {executor.submit(_process_single_segment, task): task for task in resolved_tasks}
+            completed_count = 0
+            for future in as_completed(futures):
+                idx, dst, cam, s, e, elapsed, rule_desc = future.result()
+                seg_outputs[idx - 1] = dst
+                completed_count += 1
+                progress_pct = (completed_count / total_segments) * 100
+                print(f"  [{completed_count:02d}/{total_segments:02d} ({progress_pct:4.0f}%)] Cut #{idx:02d} | {cam} ({format_seconds(s)} → {format_seconds(e)}) [{elapsed:.2f}s]{rule_desc}", flush=True)
 
     # Step 2: Concatenate all segments
-    print(f"\n[Step 2/2] 🔗 Concatenating all {total_segments} segments into final edited video...")
+    print(f"\n[Stage 3B - Step 2/2] 🔗 Concatenating all {total_segments} segments into final edited video...", flush=True)
     concat_list_file = os.path.join(work_temp_dir, "concat_manifest.txt")
-    concatenate_segments(seg_outputs, output_path, concat_list_path=concat_list_file)
+    with LiveTicker(f"Stage 3B Step 2/2: Concatenating {total_segments} segments into {os.path.basename(output_path)}"):
+        concatenate_segments(seg_outputs, output_path, concat_list_path=concat_list_file)
 
     total_time = time.time() - t0
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)

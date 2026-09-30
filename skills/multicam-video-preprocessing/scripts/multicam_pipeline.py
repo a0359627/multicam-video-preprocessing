@@ -143,17 +143,19 @@ def main():
     if args.output_dir:
         os.makedirs(args.output_dir, exist_ok=True)
 
+    from modules.progress import LiveTicker
+
     # ---------------------------------------------------------
     # Step 1: Global Audio FFT Time Alignment (Audio Sync)
     # ---------------------------------------------------------
-    print(f"\n[Step 1/4] ⚡ Executing global FFT audio time alignment (Sampling Rate: {args.sr} Hz)...")
+    print(f"\n[Stage 1 - Step 1/4] ⚡ Executing global FFT audio time alignment (Sampling Rate: {args.sr} Hz)...", flush=True)
     sync_t0 = time.time()
     ref_info, target_results = sync_all_targets(
         args.ref, args.targets, sr=args.sr, sample_dur=args.sample_dur, workers=args.workers,
         full_scan=args.full_scan, refine_subframe=not args.no_subframe_refine
     )
     sync_duration = time.time() - sync_t0
-    print(f"  ✓ Time alignment complete! Processed {total_cams} cameras in {sync_duration:.2f}s\n")
+    print(f"  ✓ Time alignment complete! Processed {total_cams} cameras in {sync_duration:.2f}s\n", flush=True)
 
     overlap_start, overlap_end = compute_common_overlap_range(ref_info, target_results)
     has_manual_trim = (args.ref_start is not None or args.ref_end is not None)
@@ -197,7 +199,7 @@ def main():
             f"{delim}\n"
         ])
         warning_block = "\n".join(lines)
-        print(warning_block)
+        print(warning_block, flush=True)
         sys.stderr.write(warning_block)
         sys.stderr.flush()
 
@@ -215,24 +217,25 @@ def main():
     temp_norm_dir = None
 
     if args.normalize:
-        print(f"\n[Step 2/4] 🎚️  Executing full-length EBU R128 audio normalization ({args.lufs} LUFS)...")
+        print(f"\n[Stage 1 - Step 2/4] 🎚️  Executing full-length EBU R128 audio normalization ({args.lufs} LUFS)...", flush=True)
         temp_norm_dir = tempfile.TemporaryDirectory()
-        audio_map, norm_total_time = normalize_all_audio_tracks(
-            all_inputs, temp_norm_dir.name,
-            lufs=args.lufs, lra=args.lra, tp=args.tp,
-            audio_bitrate=args.audio_bitrate, workers=args.workers
-        )
-        print(f"  ✓ Audio normalization complete! Total time: {norm_total_time:.1f}s\n")
+        with LiveTicker(f"Stage 1 Step 2/4: EBU R128 two-pass audio normalization ({total_cams} cameras)"):
+            audio_map, norm_total_time = normalize_all_audio_tracks(
+                all_inputs, temp_norm_dir.name,
+                lufs=args.lufs, lra=args.lra, tp=args.tp,
+                audio_bitrate=args.audio_bitrate, workers=args.workers
+            )
+        print(f"  ✓ Audio normalization complete! Total time: {norm_total_time:.1f}s\n", flush=True)
     else:
-        print("\n[Step 2/4] 🎚️  Audio normalization: Skipped (flag --normalize not specified)")
+        print("\n[Stage 1 - Step 2/4] 🎚️  Audio normalization: Skipped (flag --normalize not specified)", flush=True)
 
     # ---------------------------------------------------------
     # Step 3: Export Full Synced Masters or Manual Trim Range
     # ---------------------------------------------------------
     if args.output_dir or has_manual_trim:
         trim_label = "Manual Trim Range" if has_manual_trim else "Full Synchronized Overlap"
-        print(f"\n[Step 3/4] ✂️  Exporting {trim_label} masters ({total_cams} cameras)...")
-        print(f"  Ref Range: {format_seconds(t_ref_start)} → {format_seconds(t_ref_end)} (Duration: {format_seconds(t_ref_end - t_ref_start)})")
+        print(f"\n[Stage 1 - Step 3/4] ✂️  Exporting {trim_label} masters ({total_cams} cameras)...", flush=True)
+        print(f"  Ref Range: {format_seconds(t_ref_start)} → {format_seconds(t_ref_end)} (Duration: {format_seconds(t_ref_end - t_ref_start)})", flush=True)
 
         # Export JSON / CSV reports
         json_path = args.export_json or (os.path.join(args.output_dir, "multicam_sync.json") if args.output_dir else None)
@@ -240,11 +243,11 @@ def main():
 
         if json_path:
             export_sync_json(json_path, ref_info, target_results, trim_info=trim_info)
-            print(f"  📄 Alignment metadata exported to JSON: {json_path}")
+            print(f"  📄 Alignment metadata exported to JSON: {json_path}", flush=True)
 
         if csv_path:
             export_sync_csv(csv_path, ref_info, target_results, trim_info=trim_info)
-            print(f"  📄 Alignment table exported to CSV: {csv_path}")
+            print(f"  📄 Alignment table exported to CSV: {csv_path}", flush=True)
 
         export_tasks = []
         if args.ref_output:
@@ -288,7 +291,6 @@ def main():
             })
 
         mode_str = "Lossless Stream Copy (-c copy)" if args.stream_copy else f"Frame-Accurate Re-encode ({args.encoder})"
-        print(f"\n  ► Exporting full-length synchronized camera masters ({total_cams} CAMs) in parallel [{mode_str}] ...")
         t_masters_start = time.time()
 
         def _export_single_task(stask):
@@ -301,36 +303,36 @@ def main():
             )
             return stask["name"], os.path.basename(stask["output"]), time.time() - t_s_0
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(export_tasks), args.workers)) as executor:
-            e_futures = [executor.submit(_export_single_task, st) for st in export_tasks]
-            for fut in concurrent.futures.as_completed(e_futures):
-                src_name, dst_name, dur = fut.result()
-                print(f"    ✓ Sliced {src_name} → {dst_name} ({dur:.1f}s)")
+        with LiveTicker(f"Stage 1 Step 3/4: Exporting {total_cams} synchronized camera masters [{mode_str}]"):
+            with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(export_tasks), args.workers)) as executor:
+                e_futures = [executor.submit(_export_single_task, st) for st in export_tasks]
+                for fut in concurrent.futures.as_completed(e_futures):
+                    src_name, dst_name, dur = fut.result()
+                    print(f"    ✓ Sliced {src_name} → {dst_name} ({dur:.1f}s)", flush=True)
 
-        print(f"  ✓ All synchronized camera masters exported in {time.time() - t_masters_start:.1f}s!")
+        print(f"  ✓ All synchronized camera masters exported in {time.time() - t_masters_start:.1f}s!", flush=True)
 
         # ---------------------------------------------------------
         # Step 4: Multi-in-One Full Grid Video Composition
         # ---------------------------------------------------------
         if args.merge:
-            print(f"\n[Step 4/4] 🔲 Rendering Multi-in-One grid video ({total_cams} CAMs, {cols}x{rows} grid, {cw}x{ch}/cell -> {tot_w}x{tot_h}, {args.grid_fps}fps, GOP={args.grid_gop}, {args.grid_bitrate})...")
+            print(f"\n[Stage 1 - Step 4/4] 🔲 Rendering Multi-in-One grid video ({total_cams} CAMs, {cols}x{rows} grid, {cw}x{ch}/cell -> {tot_w}x{tot_h}, {args.grid_fps}fps, GOP={args.grid_gop}, {args.grid_bitrate})...", flush=True)
             synced_video_paths = [t["output"] for t in export_tasks]
             script_dir = args.output_dir or "."
             merged_video_path = os.path.join(script_dir, "multicam_merged_full.mp4")
-            print(f"  ► Composing Multi-in-One grid video ({total_cams} CAMs -> {tot_w}x{tot_h}) → {os.path.basename(merged_video_path)} ...")
             t_comp = compose_multicam_video(
                 synced_video_paths, merged_video_path,
                 video_bitrate=args.grid_bitrate, audio_bitrate=args.grid_audio_bitrate,
                 fps=args.grid_fps, gop=args.grid_gop,
                 encoder=args.encoder
             )
-            print(f"    ✓ Composed {os.path.basename(merged_video_path)} in {t_comp:.1f}s")
+            print(f"    ✓ Composed {os.path.basename(merged_video_path)} in {t_comp:.1f}s", flush=True)
         else:
-            print(f"\n[Step 4/4] 🔲 Multi-in-One composition: Skipped (flag --merge not specified)")
+            print(f"\n[Stage 1 - Step 4/4] 🔲 Multi-in-One composition: Skipped (flag --merge not specified)", flush=True)
 
         print("\n" + "=" * 78)
-        print("✅  Multi-Camera Preprocessing Completed Successfully!")
-        print("=" * 78 + "\n")
+        print("✅  Stage 1 Multi-Camera Preprocessing Completed Successfully!", flush=True)
+        print("=" * 78 + "\n", flush=True)
         if temp_norm_dir:
             temp_norm_dir.cleanup()
         return

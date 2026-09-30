@@ -71,9 +71,15 @@ flowchart TD
     S3B --> G3B{"Gate 3B Verification<br/>final_cut_full.mp4 exists"}
 ```
 
+### Live Progress Reporting & User Feedback Protocol
+- **Before Each Stage**: Output a concise status update to the user announcing the active stage and its sub-steps (`Stage 1: Step 1/4 Audio Sync -> Step 2/4 -14 LUFS Norm -> Step 3/4 Synced Masters -> Step 4/4 Grid Merge`, `Stage 2: Step 1/3 Silence Segmentation -> Step 2/3 Gemini 3.8 Flash Inference -> Step 3/3 8-Check EDL Validation`, `Stage 3A: FCP7 XML Export`, `Stage 3B: Direct Video Render`).
+- **During Long-Running Commands (`NotificationTimeoutSeconds=60`)**:
+  - Always set `NotificationTimeoutSeconds=60` when running `multicam_pipeline.py`, `generate_edl.py`, or `edl_to_video.py` via `run_command`.
+  - Whenever a command is still running after 60 seconds, inspect the latest `[Stage N - Step X/Y]` and `⏳ [In Progress]` lines in the task output, send a 1-line progress update to the user in the chat window (e.g., which step/part is currently running and elapsed time), and schedule a 60-second follow-up check (`schedule` with `DurationSeconds="60"` and `TimerCondition="<task-id>"`) until the command completes.
+
 ### Stage 1: Physical Preprocessing (Sync, Normalization, Master Export, Grid Merge)
-- **User Status Update**: `"正在進行多機位時間對齊與音量標準化..."` (localized to user's language)
-- **Execution Command**:
+- **User Status Update**: `"正在執行 Stage 1：多機位聲學對齊、-14 LUFS 響度標準化、同步母帶匯出與多分割網格合成..."` (localized to user's language)
+- **Execution Command** (run with `NotificationTimeoutSeconds=60`):
   ```bash
   # Local Camera Files or Google Drive File Links:
   python3 "${SKILL_DIR}/scripts/multicam_pipeline.py" \
@@ -90,9 +96,9 @@ flowchart TD
   - `<OUTPUT_DIR>/<CAM>_synced.mp4` full-length synchronized masters exist for all cameras.
   - `<OUTPUT_DIR>/multicam_merged_full.mp4` grid video exists and is non-empty.
 
-### Stage 2: Gemini AI Multimodal Rough-Cut (Agentic Video EDL Generation)
-- **User Status Update**: `"正在進行 Agentic Video AI 鏡頭剪輯分析..."` (localized to user's language)
-- **Execution Command**:
+### Stage 2: Gemini AI Multimodal Rough-Cut (Silence-Aware Smart Segmentation + Parallel Low-Res Inference)
+- **User Status Update**: `"正在執行 Stage 2：靜音感知智慧分段與 Gemini 3.8 Flash 多模態鏡頭粗剪分析..."` (localized to user's language)
+- **Execution Command** (run with `NotificationTimeoutSeconds=60`):
   ```bash
   python3 "${SKILL_DIR}/scripts/generate_edl.py" \
     -v <OUTPUT_DIR>/multicam_merged_full.mp4 \
@@ -104,19 +110,20 @@ flowchart TD
   - `<OUTPUT_DIR>/edl_full_report.md` exists with cutting rationale and validation report table.
 
 ### Stage 3A: Export NLE Timeline (Primary Path / 90% Use Case)
-- **User Status Update**: `"正在匯出剪輯時間線 (XML)..."` (localized to user's language)
+- **User Status Update**: `"正在執行 Stage 3A：匯出剪輯時間線 (FCP7 XML)..."` (localized to user's language)
 - **Execution Command**:
   ```bash
   python3 "${SKILL_DIR}/scripts/export_fcp7_xml.py" \
     -d <OUTPUT_DIR> -o <OUTPUT_DIR>/final_cut_full.xml \
     --strict-edl --lang <zh-TW|en>
   ```
-- **Exit Gate 3A Verification**:
-  - `<OUTPUT_DIR>/final_cut_full.xml` exists and size $> 0\text{ bytes}$.
+- **Exit Gate 3A Verification & Proactive Stage 3B Offer**:
+  - Verify `<OUTPUT_DIR>/final_cut_full.xml` exists and size $> 0\text{ bytes}$.
+  - **Mandatory User Prompt**: When finishing at Stage 3A (without running Stage 3B), ALWAYS inform the user in your final summary that if they also want a directly playable multi-camera rough-cut MP4 video (`<OUTPUT_DIR>/final_cut_full.mp4`) assembled according to `edl_full.csv`, you can immediately run **Stage 3B (`edl_to_video.py`)** to render it for them.
 
 ### Stage 3B: Direct Video Rendering (Secondary Fast Preview Path / 10% Use Case)
-- **User Status Update**: `"正在渲染影片成片..."` (localized to user's language)
-- **Execution Command**:
+- **User Status Update**: `"正在執行 Stage 3B：依照 EDL 切換機位渲染成品影片 (final_cut_full.mp4)..."` (localized to user's language)
+- **Execution Command** (run with `NotificationTimeoutSeconds=60`):
   ```bash
   python3 "${SKILL_DIR}/scripts/edl_to_video.py" \
     --edl <OUTPUT_DIR>/edl_full.csv --media-dir <OUTPUT_DIR> \

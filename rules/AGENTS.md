@@ -21,8 +21,10 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Keep all generated documentation and validation reports in plain, professional technical text.
 - Always respond to the user in their prompt language (Traditional Chinese `zh-TW` when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.) and pass the matching `--lang` flag to validation scripts.
 
-## 4. Acoustic Ground Truth & 3-Stage Pipeline Integrity
+## 4. Acoustic Ground Truth, Live Progress & 3-Stage Pipeline Integrity
 - Execute the 3-Stage Gated Workflow sequentially (`multicam_pipeline.py` -> `generate_edl.py` -> `export_fcp7_xml.py` / `edl_to_video.py`) as specified in `skills/multicam-video-preprocessing/SKILL.md`.
+- Pass `NotificationTimeoutSeconds=60` on `run_command` for long-running stages (`multicam_pipeline.py`, `generate_edl.py`, `edl_to_video.py`). When notified that a command is still running, report the current `[Stage N - Step X/Y]` progress to the user and schedule a 60s follow-up check (`TimerCondition="<task-id>"`).
 - All time alignments and EDL cut points must respect MFCC subframe acoustic alignment (<0.125ms) and the unified grid video (`multicam_merged_full.mp4`). Long videos (>40 min) are automatically segmented at natural silence points inside `generate_edl.py` and stitched back into `edl_full.csv`.
 - Do NOT manually split footage into intermediate chapters outside `generate_edl.py` or use legacy AI Studio API keys (`GEMINI_API_KEY`).
 - Verify all required stage exit criteria files exist and are non-empty (`> 0 bytes`) before proceeding to the next stage or declaring task completion.
+- When finishing at Stage 3A (`final_cut_full.xml`), always explicitly inform the user in your completion message that you can also render a playable rough-cut MP4 video (`final_cut_full.mp4`) via Stage 3B (`edl_to_video.py`) if needed.

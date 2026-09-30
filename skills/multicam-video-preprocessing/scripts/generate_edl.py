@@ -593,8 +593,9 @@ def main():
     try:
         if use_silence_segmentation:
             print(
-                f"\n[Step 1/3] 🔇 Video duration is {format_edl_timestamp(total_video_dur)} "
-                f"(> {args.chunk_max_dur / 60.0:.0f} mins). Scanning for natural silence split points..."
+                f"\n[Stage 2 - Step 1/3] 🔇 Video duration is {format_edl_timestamp(total_video_dur)} "
+                f"(> {args.chunk_max_dur / 60.0:.0f} mins). Scanning for natural silence split points...",
+                flush=True,
             )
             split_points = find_natural_split_points(
                 local_video_path,
@@ -607,15 +608,16 @@ def main():
                 shutil.rmtree(chunks_dir, ignore_errors=True)
 
             chunks = slice_video_into_temp_chunks(local_video_path, split_points, chunks_dir)
-            print(f"  ✓ Sliced {len(chunks)} segments at natural silence points into {chunks_dir}:")
+            print(f"  ✓ Sliced {len(chunks)} segments at natural silence points into {chunks_dir}:", flush=True)
             for c in chunks:
                 print(
                     f"    • Part {c['part_index']}/{c['total_parts']}: "
                     f"{format_edl_timestamp(c['start_sec'])} -> {format_edl_timestamp(c['end_sec'])} "
-                    f"({c['duration_sec'] / 60.0:.1f} mins)"
+                    f"({c['duration_sec'] / 60.0:.1f} mins)",
+                    flush=True,
                 )
 
-            print(f"\n[Step 2/3] 🚀 Uploading & running parallel Non-Agentic inference ({len(chunks)} parts)...")
+            print(f"\n[Stage 2 - Step 2/3] 🚀 Uploading & running parallel Non-Agentic inference ({len(chunks)} parts)...", flush=True)
             t_all_start = time.time()
 
             def _process_single_chunk(chunk_info):
@@ -667,11 +669,17 @@ def main():
                 }
 
             chunk_results = []
-            with LiveTicker(f"Vertex AI Gemini ({args.model}) analyzing {len(chunks)} silence-aligned parts in parallel"):
+            with LiveTicker(f"Stage 2 Step 2/3: Vertex AI Gemini ({args.model}) analyzing {len(chunks)} silence-aligned parts in parallel"):
                 with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(chunks), 3)) as executor:
                     futures = [executor.submit(_process_single_chunk, c) for c in chunks]
                     for fut in concurrent.futures.as_completed(futures):
-                        chunk_results.append(fut.result())
+                        r_done = fut.result()
+                        chunk_results.append(r_done)
+                        print(
+                            f"    ✓ Part {r_done['part_index']}/{len(chunks)} completed in {r_done['duration']:.1f}s "
+                            f"({len(r_done['csv_rows']) - 1 if r_done['csv_rows'] else 0} cuts)",
+                            flush=True,
+                        )
 
             chunk_results.sort(key=lambda x: x["part_index"])
             duration = time.time() - t_all_start
@@ -736,7 +744,7 @@ def main():
                         video_duration_sec=total_video_dur,
                     )
             else:
-                print(f"\n[Step 2/3] 🤖 Calling Vertex AI Gemini model: {args.model} (Standard Low-Res Mode) ...")
+                print(f"\n[Stage 2 - Step 2/3] 🤖 Calling Vertex AI Gemini model: {args.model} (Standard Low-Res Mode) ...", flush=True)
                 response_text, usage_info, duration = generate_edl_content_standard(
                     video_uri,
                     prompt_text,
@@ -763,14 +771,14 @@ def main():
             csv_rows, known_cameras=known_cams, max_gap_sec=args.edl_max_gap_sec, lang=args.lang
         )
         val_report_str = format_validation_report(validation_result, lang=args.lang)
-        print(f"\n{val_report_str}")
+        print(f"\n{val_report_str}", flush=True)
 
         # Write CSV
         with open(edl_csv_path, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerows(csv_rows)
-        print("\n[Step 3/3] 📁 Saved outputs:")
-        print(f"  ✓ EDL Decision CSV : {edl_csv_path} ({len(csv_rows) - 1} shot cuts)")
+        print("\n[Stage 2 - Step 3/3] 📁 Saved outputs:", flush=True)
+        print(f"  ✓ EDL Decision CSV : {edl_csv_path} ({len(csv_rows) - 1} shot cuts)", flush=True)
 
         # Write alias edl.csv if this is full cut
         if not args.output_csv:
