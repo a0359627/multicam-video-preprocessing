@@ -10,7 +10,7 @@
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** は、2〜6 台のカメラ映像の音響同期、ラウドネス正規化、AI ラフカットタイムライン生成、およびマルチカメラプレビュー動画レンダリングを実行します。
+**Multi-Camera Video Pipeline & AI Editing Suite** は、2〜6 台のカメラ映像の音響同期、ラウドネス正規化、AI ラフカットタイムライン生成、およびマルチカメラプレビュー動画レンダリングを実行します。Antigravity チャット画面で自然言語で指示するだけで、マルチカメラ前処理からラフカット生成までを自動実行します。
 
 ---
 
@@ -38,40 +38,43 @@ chmod +x setup.sh
 
 ---
 
-## 3 ステージ実行ワークフローと CLI コマンド
+## 利用シナリオと Agent プロンプト例 (User Scenarios & Agent Prompts)
 
-### Stage 1：マルチカメラ同期＆前処理 (`multicam_pipeline.py`)
-1. **MFCC 音響アライメント＆サブフレーム微調整（`<0.125 ms`）**：3 段階スキャンと `--strict-sync` による低信頼度ゲートを備えています。
-2. **EBU R128 (`-14 LUFS`) 2 パス線形ラウドネス正規化**：ダイナミックレンジを損なわずに `-14.0 LUFS` に統一します。
-3. **フレーム精度同期マスター出力 (`CAM*_synced.mp4`)**：ハードウェアエンコードによりキーフレームずれを排除します。
-4. **ゼロ分割グリッド合成 (`multicam_merged_full.mp4`)**：2〜6 カメラを単一キャンバス（$\le 1920 \times 1080$）に合成します。
+### シナリオ 1：NLE 用 FCP7 XML タイムライン出力（推奨メインワークフロー）
+- **ユースケース**：AI ラフカットのカメラ切り替え判定を DaVinci Resolve、Adobe Premiere Pro、または Final Cut Pro に読み込み、本編集やカラーグレーディングを行います。
+- **Agent プロンプト例**：
+  > *「`CAM1.mp4` と `CAM2.mp4` を同期してラウドネスを -14 LUFS に正規化し、DaVinci Resolve 用の FCP7 XML ラフカットタイムラインを出力して。」*
+- **生成される成果物**：
+  1. `final_cut_full.xml`（カメラ切り替え点と理由マーカーを含むタイムライン）。
+  2. `CAM1_synced.mp4`、`CAM2_synced.mp4`（時間同期および `-14 LUFS` 正規化済みカメラマスター）。
 
-```bash
-python3 scripts/multicam_pipeline.py \
-  --ref CAM1.mp4 --targets CAM2.mp4 CAM3.mp4 \
-  --normalize --merge -o output/
-```
+### シナリオ 2：ラフカット動画の直接レンダリング
+- **ユースケース**：NLE を開かずに、カメラ切り替え済みの MP4 プレビュー動画を直接レンダリングします。
+- **Agent プロンプト例**：
+  > *「これらのマルチカメラ映像を AI ラフカットして、`final_cut_full.mp4` を直接レンダリングして。」*
+- **生成される成果物**：
+  1. `final_cut_full.mp4`（シングルパス・ハードウェアレンダリング済み動画）。
+  2. `edl_full.csv` および `edl_full_report.md`（カメラ切り替えリストと 8 項目検証レポート）。
 
-### Stage 2：Gemini 3.8 Flash Agentic Video ラフカット (`generate_edl.py`)
-**Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）で `edl_full.csv` を生成し、8 項目の決定論的 EDL 検証（`6 ERROR + 2 WARN`）を実行します：
-
-```bash
-python3 scripts/generate_edl.py -v output/multicam_merged_full.mp4 --strict-edl --lang ja
-```
-
-### Stage 3A：FCP7 XML タイムライン出力 (`export_fcp7_xml.py`)
-```bash
-python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_full.xml --fps 29.97 --drop-frame
-```
-
-### Stage 3B：シングルパス動画レンダリング (`edl_to_video.py`)
-```bash
-python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl
-```
+### シナリオ 3：Google Drive フォルダからのマルチカメラ同期＆ラフカット
+- **ユースケース**：Google Drive 共有フォルダ内の全カメラ映像を MD5 キャッシュ検証付きで自動取得し、同期からタイムライン出力まで一括実行します。
+- **Agent プロンプト例**：
+  > *「Google Drive フォルダ `https://drive.google.com/drive/folders/FOLDER_ID` のマルチカメラ素材を同期・正規化して、FCP7 XML タイムラインを生成して。」*
+- **生成される成果物**：
+  1. `CAM1_synced.mp4` .. `CAMn_synced.mp4`（同期・ラウドネス正規化済みマスター）。
+  2. `edl_full.csv`、`edl_full_report.md`、`final_cut_full.xml`。
 
 ---
 
-## Google Drive 連携と GCS 2 階層ライフサイクルポリシー
+## 3 ステージ実行ワークフロー
+
+1. **Stage 1（マルチカメラ同期＆前処理）**：MFCC 音響アライメント＆サブフレーム微調整（`<0.125 ms`）、EBU R128（`-14 LUFS`）2 パス線形ラウドネス正規化、フレーム精度同期マスター出力（`CAM*_synced.mp4`）、およびゼロ分割グリッド合成（`multicam_merged_full.mp4`）を実行します。
+2. **Stage 2（Gemini 3.8 Flash Agentic Video ラフカット）**：**Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）でカウントダウンやカチンコを自動除去して `edl_full.csv` を生成し、8 項目の決定論的 EDL 検証（`6 ERROR + 2 WARN`）を実行します。
+3. **Stage 3A & 3B（FCP7 XML タイムライン出力 / シングルパス動画レンダリング）**：NTSC 非整数フレームレート（`23.976`, `29.97`, `59.94`）やドロップフレームに対応した `final_cut_full.xml` の出力、または `final_cut_full.mp4` の直接レンダリングを行います。
+
+---
+
+## GCS 2 階層ライフサイクルポリシー (`gs://multicam-video-${PROJECT_ID}`)
 
 | GCS パス接頭辞 (`matchesPrefix`) | 保存対象 | 保持期間 (`age`) | クリーンアップ動作 |
 | :--- | :--- | :--- | :--- |

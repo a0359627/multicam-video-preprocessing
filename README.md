@@ -10,7 +10,7 @@
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** synchronizes 2 to 6 camera angles, normalizes broadcast loudness, generates AI rough-cut timelines, and renders multi-camera preview videos. Instruct the Antigravity Agent in natural language or run the CLI scripts directly.
+**Multi-Camera Video Pipeline & AI Editing Suite** synchronizes 2 to 6 camera angles, normalizes broadcast loudness, generates AI rough-cut timelines, and renders multi-camera preview videos. Instruct the Antigravity Agent in natural language to execute the complete multi-camera preprocessing and rough-cut workflow.
 
 ---
 
@@ -122,43 +122,38 @@ flowchart TD
   1. `final_cut_full.mp4` (Single-pass hardware-rendered full video).
   2. `edl_full.csv` and `edl_full_report.md` (Camera switching decisions and semantic validation report).
 
+### Scenario 3: Multi-Camera Rough-Cut from a Google Drive Folder
+- **Use Case**: Process all camera angles stored in a shared Google Drive folder with automatic `md5Checksum` cache verification.
+- **Agent Prompt**:
+  > *"Download the multi-camera footage from `https://drive.google.com/drive/folders/FOLDER_ID`, synchronize and normalize the audio, and generate an FCP7 XML timeline."*
+- **Deliverables**:
+  1. `CAM1_synced.mp4` .. `CAMn_synced.mp4` (Synchronized and loudness-normalized masters).
+  2. `edl_full.csv`, `edl_full_report.md`, and `final_cut_full.xml`.
+
 ---
 
 ## Detailed Pipeline Stages
 
-### Stage 1: Multicam Synchronization & Preprocessing (`multicam_pipeline.py`)
+### Stage 1: Multicam Synchronization & Preprocessing
 
 1. **MFCC Acoustic Alignment & Subframe Refinement (`<0.125 ms`)**:
    - **MFCC Correlation**: Compares Mel-Frequency Cepstral Coefficient envelopes across camera tracks. This reduces FFT memory usage by 97.7% and aligns 1-hour recordings in under 0.3 seconds.
    - **3-Tier Fallback Ladder**:
      1. *Fast MFCC Scan*: Scans the first 120 seconds. Completes immediately if the BBC confidence score $Z \ge 12.0$.
-     2. *Full MFCC Scan*: Scans the full duration if $Z < 12.0$ or when `--full-scan` is passed.
+     2. *Full MFCC Scan*: Scans the full duration if $Z < 12.0$.
      3. *Raw Waveform Fallback*: Runs full-length 1D FFT cross-correlation if $Z < 7.0$.
    - **Subframe Refinement (`0.125 ms`)**: Searches a $\pm 32\text{ ms}$ window around the highest-energy 5-second speech segment to lock alignment to a single audio sample at 8 kHz.
-   - **Confidence Gate (`--strict-sync`)**: Emits warnings when $Z < 7.0$ and aborts with exit code 1 when `--strict-sync` is enabled.
 2. **EBU R128 (`-14 LUFS`) Two-Pass Linear Loudness Normalization**:
    - **Pass 1**: Measures Integrated Loudness (`I`), Loudness Range (`LRA = 11.0 LU`), and True Peak (`TP = -1.5 dBTP`).
    - **Pass 2**: Applies linear gain (`linear=true`) to lock integrated loudness at `-14.0 LUFS` without dynamic pumping or peak clipping.
 3. **Frame-Accurate Synchronized Masters (`CAM*_synced.mp4`)**:
-   - Re-encodes camera masters using hardware acceleration (`h264_videotoolbox` on Apple Silicon or `libx264 -crf 18`) to eliminate keyframe drift. Pass `--stream-copy` only when fast keyframe-snapped cutting is desired.
+   - Re-encodes camera masters using hardware acceleration (`h264_videotoolbox` on Apple Silicon or `libx264 -crf 18`) to eliminate keyframe drift.
 4. **Zero-Split Full-Length Grid Composition (`multicam_merged_full.mp4`)**:
    - Combines 2 to 6 synchronized cameras into one labeled canvas ($\le 1920 \times 1080$, each cell $\ge 640 \times 480$).
 
-```bash
-# Standard Stage 1 run (Sync, Normalize, Export Synced Masters, and Merge Grid):
-python3 scripts/multicam_pipeline.py \
-  --ref CAM1.mp4 --targets CAM2.mp4 CAM3.mp4 \
-  --normalize --merge -o output/
-
-# Sync directly from a Google Drive folder URL:
-python3 scripts/multicam_pipeline.py \
-  --gdrive-folder "https://drive.google.com/drive/folders/FOLDER_ID" \
-  --normalize --merge -o output/
-```
-
 ---
 
-### Stage 2: Gemini 3.8 Flash Agentic Video Rough-Cut (`generate_edl.py`)
+### Stage 2: Gemini 3.8 Flash Agentic Video Rough-Cut
 
 1. **Pre-Roll and Countdown Removal**:
    - Removes clapperboards, mic checks, and on-set countdowns (`5, 4, 3, 2, 1`).
@@ -167,54 +162,24 @@ python3 scripts/multicam_pipeline.py \
    - Sends `multicam_merged_full.mp4` to **Vertex AI Gemini 3.8 Flash** (`processing="agentic"`), reducing input tokens by 99.7% without splitting long videos into chapters.
 3. **8-Check Deterministic EDL Semantic Validation**:
    - Validates `E_NO_ROWS`, `E_PARSE_TIME`, `E_NEGATIVE_DURATION`, `E_NON_MONOTONIC`, `E_OVERLAP`, `E_EMPTY_CAMERA`, `W_UNKNOWN_CAMERA`, and `W_GAP`.
-   - Always writes `edl_full.csv` and `edl_full_report.md` to disk before exiting when `--strict-edl` is set.
-
-```bash
-# Standard EDL generation:
-python3 scripts/generate_edl.py -v output/multicam_merged_full.mp4
-
-# Strict validation with Traditional Chinese report:
-python3 scripts/generate_edl.py -v output/multicam_merged_full.mp4 --strict-edl --lang zh-TW
-```
+   - Writes `edl_full.csv` and `edl_full_report.md` to disk for review.
 
 ---
 
-### Stage 3A: Export FCP7 XML Timeline (`export_fcp7_xml.py`)
+### Stage 3A: Export FCP7 XML Timeline
 
 1. **Direct Synced Master Linking**: References `CAM1_synced.mp4`..`CAMn_synced.mp4` with 1:1 timecode mapping (`start == in`, `end == out`).
-2. **NTSC Fractional FPS & Drop-Frame Support**: Supports `23.976`, `24`, `25`, `29.97`, `30`, `50`, `59.94`, and `60` fps, plus `--drop-frame` (`DF`).
-
-```bash
-# Standard 30 fps XML export:
-python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_full.xml
-
-# Broadcast 29.97 fps Drop-Frame XML export:
-python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_full.xml --fps 29.97 --drop-frame
-```
+2. **NTSC Fractional FPS & Drop-Frame Support**: Supports `23.976`, `24`, `25`, `29.97`, `30`, `50`, `59.94`, and `60` fps, plus Drop-Frame (`DF`) timecode.
 
 ---
 
-### Stage 3B: Single-Pass Video Rendering (`edl_to_video.py`)
+### Stage 3B: Single-Pass Video Rendering
 
-Renders `final_cut_full.mp4` directly from the synchronized camera masters in a single hardware-accelerated pass:
-
-```bash
-python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl
-```
+Renders `final_cut_full.mp4` directly from the synchronized camera masters in a single hardware-accelerated pass when requested by the user.
 
 ---
 
-## Google Drive Direct Links & Two-Tier GCS Lifecycle Policy
-
-### 1. Supported Google Drive Scenarios (`drive.readonly` ADC)
-
-| Scenario | Script & Flag | Automated Behavior |
-| :--- | :--- | :--- |
-| **Scenario A: Multi-Cam Folder Link** | `multicam_pipeline.py --gdrive-folder "FOLDER_URL"` | Lists all camera videos via Drive API v3, sorts `CAM1..CAMn` naturally, verifies `md5Checksum`, and caches in `gdrive_inputs/`. |
-| **Scenario B: Individual Camera Links** | `multicam_pipeline.py --ref "CAM1_URL" --targets "CAM2_URL"` | Verifies remote MD5, recovers UTF-8 CJK filenames, and caches locally for subframe alignment. |
-| **Scenario C: Grid Video to EDL** | `generate_edl.py -v "GDRIVE_VIDEO_URL"` | Matches remote `gdrive_md5` against GCS blob metadata to skip redundant transfers. |
-
-### 2. Two-Tier GCS Bucket Lifecycle Policy (`gs://multicam-video-${PROJECT_ID}`)
+## Two-Tier GCS Bucket Lifecycle Policy (`gs://multicam-video-${PROJECT_ID}`)
 
 | GCS Prefix (`matchesPrefix`) | Stored Objects | Retention (`age`) | Cleanup Mechanism |
 | :--- | :--- | :--- | :--- |

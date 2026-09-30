@@ -10,7 +10,7 @@
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** 支援 2 至 6 機位音訊同步、廣播級響度標準化、AI 智慧粗剪時間軸生成與多機位預覽影片渲染。可直接於 Antigravity 對話視窗以自然語言下達指令，或透過終端機 CLI 執行。
+**Multi-Camera Video Pipeline & AI Editing Suite** 支援 2 至 6 機位音訊同步、廣播級響度標準化、AI 智慧粗剪時間軸生成與多機位預覽影片渲染。直接於 Antigravity 對話視窗以自然語言下達指令，即可由 Agent 自動完成多機位同步與粗剪工作流。
 
 ---
 
@@ -98,44 +98,58 @@ flowchart TD
 
 ---
 
-## 三階段核心功能與 CLI 指令
+## 使用情境與 Agent 指令範例 (User Scenarios & Agent Prompts)
 
-### Stage 1：多機位同步與前處理 (`multicam_pipeline.py`)
-1. **MFCC 聲學時間對齊與次影格微調（`<0.125 ms`）**：採用三階掃描（120 秒快速掃描 $\rightarrow$ 全長 MFCC $\rightarrow$ 原始波形 1D FFT）並將精準度鎖定至單一音訊取樣點。支援 `--strict-sync` 低信心度自動攔截。
+### 情境 1：匯出專業 NLE XML 時間軸（建議主要工作流）
+- **適用場景**：將 AI 多機位粗剪決策匯入 DaVinci Resolve、Adobe Premiere Pro 或 Final Cut Pro 進行精剪與調色。
+- **Agent 指令範例**：
+  > *「幫我同步 `CAM1.mp4` 與 `CAM2.mp4`，將響度標準化至 -14 LUFS，並產生可匯入 DaVinci Resolve 的 FCP7 XML 粗剪時間軸。」*
+- **交付成果**：
+  1. `final_cut_full.xml`（包含機位切換切點與剪輯理由標記的時間軸）。
+  2. `CAM1_synced.mp4`、`CAM2_synced.mp4`（已完成毫秒級對齊與 `-14 LUFS` 響度標準化之同步母帶）。
+- **匯入 DaVinci Resolve 步驟**：
+  1. 開啟 DaVinci Resolve 並建立新專案。
+  2. 將 `output/CAM1_synced.mp4` 與 `output/CAM2_synced.mp4` 拖入 **Media Pool**。
+  3. 點選 **File -> Import -> Timeline...**（`Cmd + Shift + I`）並選擇 `final_cut_full.xml`。
+
+### 情境 2：直接渲染多機位粗剪成品影片
+- **適用場景**：不進入剪輯軟體，直接輸出完成機位切換的 MP4 預覽或成品影片。
+- **Agent 指令範例**：
+  > *「幫我把這幾支多機位影片做 AI 粗剪，並直接渲染出 `final_cut_full.mp4`。」*
+- **交付成果**：
+  1. `final_cut_full.mp4`（單次硬體加速渲染之完整影片）。
+  2. `edl_full.csv` 與 `edl_full_report.md`（機位切換決策表與 8 項語意驗證報告）。
+
+### 情境 3：直接從 Google Drive 資料夾進行多機位同步與粗剪
+- **適用場景**：直接提供存放多機位素材的 Google Drive 資料夾連結，由 Agent 自動下載（具備 `md5Checksum` 快取驗證）、同步並產生粗剪時間軸。
+- **Agent 指令範例**：
+  > *「從這個 Google Drive 資料夾 `https://drive.google.com/drive/folders/FOLDER_ID` 下載多機位素材，完成音訊同步與 -14 LUFS 標準化，並匯出 FCP7 XML 時間軸。」*
+- **交付成果**：
+  1. `CAM1_synced.mp4` .. `CAMn_synced.mp4`（同步與響度標準化母帶）。
+  2. `edl_full.csv`、`edl_full_report.md` 與 `final_cut_full.xml`。
+
+---
+
+## 三階段核心技術說明
+
+### Stage 1：多機位同步與前處理
+1. **MFCC 聲學時間對齊與次影格微調（`<0.125 ms`）**：採用三階掃描（120 秒快速掃描 $\rightarrow$ 全長 MFCC $\rightarrow$ 原始波形 1D FFT）並將精準度鎖定至單一音訊取樣點。
 2. **EBU R128 (`-14 LUFS`) 雙階段線性響度標準化**：第一階段測量 `I`、`LRA` 與 `TP`，第二階段套用純線性增益（`linear=true`），消除動態壓縮呼吸感。
 3. **逐幀精準同步母帶匯出 (`CAM*_synced.mp4`)**：預設採用硬體加速重編碼（`h264_videotoolbox` 或 `libx264 -crf 18`），杜絕關鍵影格偏移。
 4. **零切分全長網格合成 (`multicam_merged_full.mp4`)**：將 2 至 6 機位合成為單一多視角畫布（$\le 1920 \times 1080$，每機位 $\ge 640 \times 480$）。
 
-```bash
-python3 scripts/multicam_pipeline.py \
-  --ref CAM1.mp4 --targets CAM2.mp4 CAM3.mp4 \
-  --normalize --merge -o output/
-```
-
-### Stage 2：Gemini 3.8 Flash Agentic 粗剪決策 (`generate_edl.py`)
+### Stage 2：Gemini 3.8 Flash Agentic 粗剪決策
 1. **片頭倒數與場記板零容忍剔除**：自動切除開拍倒數並驗證 `[Global_Start_Time, Global_Start_Time + 2.0s]` 區間。
 2. **零切分 Agentic 影片推論**：直接將全長網格影片送入 **Vertex AI Gemini 3.8 Flash**（`processing="agentic"`），減少 99.7% Token 消耗。
-3. **8 項確定性 EDL 語意驗證**：檢查 `E_NO_ROWS`、`E_PARSE_TIME`、`E_NEGATIVE_DURATION`、`E_NON_MONOTONIC`、`E_OVERLAP`、`E_EMPTY_CAMERA`、`W_UNKNOWN_CAMERA` 與 `W_GAP`，並在 `--strict-edl` 結束前確保先寫入 CSV 與報告。
+3. **8 項確定性 EDL 語意驗證**：檢查 `E_NO_ROWS`、`E_PARSE_TIME`、`E_NEGATIVE_DURATION`、`E_NON_MONOTONIC`、`E_OVERLAP`、`E_EMPTY_CAMERA`、`W_UNKNOWN_CAMERA` 與 `W_GAP`，並產出 `edl_full.csv` 與 `edl_full_report.md`。
 
-```bash
-python3 scripts/generate_edl.py -v output/multicam_merged_full.mp4 --strict-edl --lang zh-TW
-```
-
-### Stage 3A：匯出 FCP7 XML 時間軸 (`export_fcp7_xml.py`)
-支援直接連結同步母帶、1:1 絕對時間碼對應，以及 NTSC 分數影格率（`23.976`, `29.97`, `59.94`）與掉格時間碼（`--drop-frame`）：
-
-```bash
-python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_full.xml --fps 29.97 --drop-frame
-```
-
-### Stage 3B：單次硬體加速影片渲染 (`edl_to_video.py`)
-```bash
-python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl --lang zh-TW
-```
+### Stage 3A & 3B：匯出 FCP7 XML 時間軸與硬體加速渲染
+- **Stage 3A（主要路徑）**：直接連結同步母帶、1:1 絕對時間碼對應，支援 NTSC 分數影格率（`23.976`, `29.97`, `59.94`）與掉格時間碼（Drop-Frame）。
+- **Stage 3B（次要路徑）**：直接由同步母帶進行單次硬體加速渲染輸出 `final_cut_full.mp4`。
 
 ---
 
-## Google Drive 分享連結與 GCS 雙層生命週期規則
+## GCS 雙層生命週期規則 (`gs://multicam-video-${PROJECT_ID}`)
 
 | GCS 路徑前綴 (`matchesPrefix`) | 儲存內容 | 保留天數 (`age`) | 清理機制 |
 | :--- | :--- | :--- | :--- |

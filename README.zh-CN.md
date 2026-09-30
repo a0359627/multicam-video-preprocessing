@@ -10,7 +10,7 @@
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** 支持 2 至 6 机位音频对齐、广播级响度标准化、AI 粗剪时间线生成与多机位预览视频渲染。可在 Antigravity 对话窗口使用自然语言下达指令，或通过终端 CLI 运行。
+**Multi-Camera Video Pipeline & AI Editing Suite** 支持 2 至 6 机位音频对齐、广播级响度标准化、AI 粗剪时间线生成与多机位预览视频渲染。直接在 Antigravity 对话窗口使用自然语言下达指令，即可由 Agent 自动执行多机位同步与粗剪工作流。
 
 ---
 
@@ -38,40 +38,43 @@ chmod +x setup.sh
 
 ---
 
-## 三阶段核心流程与 CLI 命令
+## 使用场景与 Agent 指令示例 (User Scenarios & Agent Prompts)
 
-### Stage 1：多机位同步与预处理 (`multicam_pipeline.py`)
-1. **MFCC 声学时间对齐与亚帧微调（`<0.125 ms`）**：支持三阶扫描与 `--strict-sync` 低置信度拦截。
-2. **EBU R128 (`-14 LUFS`) 双阶段线性响度标准化**：锁定 `-14.0 LUFS` 并消除动态压缩痕迹。
-3. **逐帧精准同步母带导出 (`CAM*_synced.mp4`)**：使用硬件加速重编码避免关键帧偏移。
-4. **零切分全长网格合成 (`multicam_merged_full.mp4`)**：将 2 至 6 机位合成为单一多视角画布（$\le 1920 \times 1080$）。
+### 场景 1：导出专业 NLE XML 时间线（推荐主要工作流）
+- **适用场景**：将 AI 多机位粗剪决策导入 DaVinci Resolve、Adobe Premiere Pro 或 Final Cut Pro 进行精剪与调色。
+- **Agent 指令示例**：
+  > *“帮我同步 `CAM1.mp4` 和 `CAM2.mp4`，将响度标准化到 -14 LUFS，并导出可导入 DaVinci Resolve 的 FCP7 XML 粗剪时间线。”*
+- **交付成果**：
+  1. `final_cut_full.xml`（包含机位切换切点与剪辑理由标记的时间线）。
+  2. `CAM1_synced.mp4`、`CAM2_synced.mp4`（已完成毫秒级对齐与 `-14 LUFS` 响度标准化的同步母带）。
 
-```bash
-python3 scripts/multicam_pipeline.py \
-  --ref CAM1.mp4 --targets CAM2.mp4 CAM3.mp4 \
-  --normalize --merge -o output/
-```
+### 场景 2：直接渲染多机位粗剪成品视频
+- **适用场景**：无需打开剪辑软件，直接输出完成机位切换的 MP4 预览或成品视频。
+- **Agent 指令示例**：
+  > *“帮我把这几支多机位视频做 AI 粗剪，并直接渲染生成 `final_cut_full.mp4`。”*
+- **交付成果**：
+  1. `final_cut_full.mp4`（单次硬件加速渲染的完整视频）。
+  2. `edl_full.csv` 与 `edl_full_report.md`（机位切换决策表与 8 项语义验证报告）。
 
-### Stage 2：Gemini 3.8 Flash Agentic 粗剪决策 (`generate_edl.py`)
-使用 **Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）对全长网格视频生成 `edl_full.csv`，并执行 8 项确定性语义检查（`6 ERROR + 2 WARN`）：
-
-```bash
-python3 scripts/generate_edl.py -v output/multicam_merged_full.mp4 --strict-edl --lang zh-CN
-```
-
-### Stage 3A：导出 FCP7 XML 时间线 (`export_fcp7_xml.py`)
-```bash
-python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_full.xml --fps 29.97 --drop-frame
-```
-
-### Stage 3B：单次硬件加速视频渲染 (`edl_to_video.py`)
-```bash
-python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl
-```
+### 场景 3：从 Google Drive 文件夹执行多机位同步与粗剪
+- **适用场景**：直接提供存放多机位素材的 Google Drive 文件夹链接，由 Agent 自动下载（含远程 MD5 缓存校验）、同步并导出粗剪时间线。
+- **Agent 指令示例**：
+  > *“从这个 Google Drive 文件夹 `https://drive.google.com/drive/folders/FOLDER_ID` 下载多机位视频，完成音频同步与 -14 LUFS 标准化，并导出 FCP7 XML 时间线。”*
+- **交付成果**：
+  1. `CAM1_synced.mp4` .. `CAMn_synced.mp4`（同步与响度标准化母带）。
+  2. `edl_full.csv`、`edl_full_report.md` 与 `final_cut_full.xml`。
 
 ---
 
-## Google Drive 直连与 GCS 双层生命周期规则
+## 三阶段核心流程架构
+
+1. **Stage 1（多机位同步与预处理）**：执行 MFCC 声学时间对齐与亚帧微调（`<0.125 ms`）、EBU R128（`-14 LUFS`）双阶段线性响度标准化、逐帧精准同步母带导出（`CAM*_synced.mp4`）与零切分全长网格合成（`multicam_merged_full.mp4`）。
+2. **Stage 2（Gemini 3.8 Flash Agentic 粗剪决策）**：使用 **Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）对全长网格视频生成 `edl_full.csv`，自动剔除片头倒数与场记板，并执行 8 项确定性语义检查（`6 ERROR + 2 WARN`）。
+3. **Stage 3A & 3B（导出 FCP7 XML 时间线 / 硬件加速视频渲染）**：支持 NTSC 分数帧率（`23.976`, `29.97`, `59.94`）与丢帧时间码（Drop-Frame）导出 `final_cut_full.xml`，或直接单次硬件渲染 `final_cut_full.mp4`。
+
+---
+
+## GCS 双层生命周期规则 (`gs://multicam-video-${PROJECT_ID}`)
 
 | GCS 路径前缀 (`matchesPrefix`) | 存储对象 | 保留天数 (`age`) | 清理机制 |
 | :--- | :--- | :--- | :--- |

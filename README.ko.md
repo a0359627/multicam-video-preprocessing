@@ -10,7 +10,7 @@
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite**는 2~6대 카메라 음향 동기화, 방송 표준 라우드니스 정규화, AI 러프컷 타임라인 생성 및 멀티카메라 프리뷰 비디오 렌더링을 수행합니다.
+**Multi-Camera Video Pipeline & AI Editing Suite**는 2~6대 카메라 음향 동기화, 방송 표준 라우드니스 정규화, AI 러프컷 타임라인 생성 및 멀티카메라 프리뷰 비디오 렌더링을 수행합니다. Antigravity 채팅 창에서 자연어로 지시하면 멀티카메라 동기화부터 러프컷 생성까지 전체 워크플로를 자동으로 수행합니다.
 
 ---
 
@@ -38,40 +38,43 @@ chmod +x setup.sh
 
 ---
 
-## 3단계 핵심 워크플로 및 CLI 명령
+## 사용 시나리오 및 Agent 프롬프트 예시 (User Scenarios & Agent Prompts)
 
-### Stage 1: 멀티카메라 동기화 및 전처리 (`multicam_pipeline.py`)
-1. **MFCC 음향 정렬 및 서브프레임 미세 조정 (`<0.125 ms`)**: 3단계 스캔과 `--strict-sync` 신뢰도 게이트를 지원합니다.
-2. **EBU R128 (`-14 LUFS`) 2패스 선형 라우드니스 정규화**: `-14.0 LUFS`로 고정합니다.
-3. **프레임 정확도 동기화 마스터 출력 (`CAM*_synced.mp4`)**: 하드웨어 인코딩을 통해 키프레임 오차를 제거합니다.
-4. **무분할 전체 그리드 합성 (`multicam_merged_full.mp4`)**: 2~6대 카메라를 단일 캔버스($\le 1920 \times 1080$)로 합성합니다.
+### 시나리오 1: 전문 NLE용 FCP7 XML 타임라인 내보내기 (권장 기본 워크플로)
+- **사용 사례**: AI 러프컷 카메라 전환 결정을 DaVinci Resolve, Adobe Premiere Pro 또는 Final Cut Pro로 가져와 정밀 편집 및 색보정을 수행합니다.
+- **Agent 프롬프트 예시**:
+  > *"`CAM1.mp4`와 `CAM2.mp4`를 동기화하고 라우드니스를 -14 LUFS로 정규화한 뒤, DaVinci Resolve용 FCP7 XML 러프컷 타임라인을 내보내 줘."*
+- **산출물**:
+  1. `final_cut_full.xml` (카메라 전환 지점 및 편집 사유 마커가 포함된 타임라인).
+  2. `CAM1_synced.mp4`, `CAM2_synced.mp4` (시간 정렬 및 `-14 LUFS` 정규화가 완료된 카메라 마스터).
 
-```bash
-python3 scripts/multicam_pipeline.py \
-  --ref CAM1.mp4 --targets CAM2.mp4 CAM3.mp4 \
-  --normalize --merge -o output/
-```
+### 시나리오 2: 멀티카메라 러프컷 비디오 직접 렌더링
+- **사용 사례**: NLE 소프트웨어를 열지 않고 카메라 전환이 완료된 MP4 프리뷰 비디오를 직접 렌더링합니다.
+- **Agent 프롬프트 예시**:
+  > *"이 멀티카메라 영상들을 AI 러프컷하고 `final_cut_full.mp4`로 직접 렌더링해 줘."*
+- **산출물**:
+  1. `final_cut_full.mp4` (단일 패스 하드웨어 가속으로 렌더링된 전체 비디오).
+  2. `edl_full.csv` 및 `edl_full_report.md` (카메라 전환 결정표 및 8개 항목 검증 리포트).
 
-### Stage 2: Gemini 3.8 Flash Agentic Video 러프컷 (`generate_edl.py`)
-**Vertex AI Gemini 3.8 Flash**(`processing="agentic"`)로 `edl_full.csv`를 생성하고 8개 항목의 결정론적 EDL 검증(`6 ERROR + 2 WARN`)을 수행합니다:
-
-```bash
-python3 scripts/generate_edl.py -v output/multicam_merged_full.mp4 --strict-edl --lang ko
-```
-
-### Stage 3A: FCP7 XML 타임라인 내보내기 (`export_fcp7_xml.py`)
-```bash
-python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_full.xml --fps 29.97 --drop-frame
-```
-
-### Stage 3B: 단일 패스 비디오 렌더링 (`edl_to_video.py`)
-```bash
-python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl
-```
+### 시나리오 3: Google Drive 폴더에서 멀티카메라 동기화 및 러프컷 수행
+- **사용 사례**: 멀티카메라 원본이 저장된 Google Drive 폴더 링크를 전달하여 원격 MD5 캐시 검증과 함께 동기화 및 타임라인 생성을 자동으로 수행합니다.
+- **Agent 프롬프트 예시**:
+  > *"Google Drive 폴더 `https://drive.google.com/drive/folders/FOLDER_ID`의 멀티카메라 영상을 다운로드하여 오디오 동기화 및 -14 LUFS 정규화를 수행하고 FCP7 XML 타임라인을 생성해 줘."*
+- **산출물**:
+  1. `CAM1_synced.mp4` .. `CAMn_synced.mp4` (동기화 및 라우드니스 정규화 마스터).
+  2. `edl_full.csv`, `edl_full_report.md`, `final_cut_full.xml`.
 
 ---
 
-## Google Drive 연동 및 GCS 2단계 수명 주기 정책
+## 3단계 핵심 워크플로 아키텍처
+
+1. **Stage 1 (멀티카메라 동기화 및 전처리)**: MFCC 음향 정렬 및 서브프레임 미세 조정(`<0.125 ms`), EBU R128(`-14 LUFS`) 2패스 선형 라우드니스 정규화, 프레임 정확도 동기화 마스터 출력(`CAM*_synced.mp4`), 무분할 전체 그리드 합성(`multicam_merged_full.mp4`)을 수행합니다.
+2. **Stage 2 (Gemini 3.8 Flash Agentic Video 러프컷)**: **Vertex AI Gemini 3.8 Flash**(`processing="agentic"`)로 카운트다운 및 슬레이트를 제거하여 `edl_full.csv`를 생성하고 8개 항목의 결정론적 EDL 검증(`6 ERROR + 2 WARN`)을 수행합니다.
+3. **Stage 3A & 3B (FCP7 XML 타임라인 내보내기 / 단일 패스 비디오 렌더링)**: NTSC 소수점 프레임 레이트(`23.976`, `29.97`, `59.94`) 및 드롭 프레임(Drop-Frame)을 지원하는 `final_cut_full.xml`을 내보내거나 `final_cut_full.mp4`를 직접 렌더링합니다.
+
+---
+
+## GCS 2단계 수명 주기 정책 (`gs://multicam-video-${PROJECT_ID}`)
 
 | GCS 경로 접두사 (`matchesPrefix`) | 저장 객체 | 보관 기간 (`age`) | 정리 방식 |
 | :--- | :--- | :--- | :--- |
