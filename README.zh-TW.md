@@ -73,27 +73,53 @@ multicam-video-preprocessing/
 
 ```mermaid
 flowchart TD
-    subgraph S1["Stage 1: 多機位前處理 (multicam_pipeline.py --normalize --merge)"]
-        A["原始素材 (CAM1, CAM2...)"] --> S1_1["1.1 MFCC 聲學對齊與次影格微調 (<0.125 ms)"]
-        S1_1 --> S1_2["1.2 EBU R128 響度標準化 (-14 LUFS)"]
-        S1_2 --> S1_3["1.3 匯出完整同步母帶 (CAM*_synced.mp4)"]
-        S1_3 --> S1_4["1.4 多機合一完整網格合成 (multicam_merged_full.mp4)"]
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["輸入多機位素材"]
+        A["原始多機位影片 (CAM1, CAM2 .. CAM6)<br/>(本機檔案或 Google Drive 資料夾)"]:::inputStyle
     end
 
-    S1_4 --> S2["Stage 2: Gemini 3.8 Flash Agentic 影片粗剪<br/>(generate_edl.py + 8 項確定性語意驗證)"]
-    S2 --> EDL["統一剪輯決策表 (edl_full.csv + edl_full_report.md)"]
+    subgraph S1["Stage 1: 多機位前處理與聲學同步"]
+        S1_1["1.1 MFCC 聲學對齊與次影格微調 (<0.125 ms)"]:::stage1Style
+        S1_2["1.2 EBU R128 雙階段響度標準化 (-14 LUFS)"]:::stage1Style
+        S1_3["交付成果 / 母帶: 完整同步母帶<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
+        S1_4["中繼產物: 多機合一完整網格影片<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_1 --> S1_2
+        S1_2 --> S1_3
+        S1_3 --> S1_4
+    end
+
+    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic 影片粗剪"]
+        S2_1["2.1 零切分 Agentic 影片推論<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+        S2_2["2.2 8 項確定性 EDL 語意驗證<br/>(6 項 ERROR + 2 項 WARN 檢查)"]:::stage2Style
+        EDL["中繼產物: 統一剪輯決策表與驗證報告<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
+        S2_1 --> S2_2
+        S2_2 --> EDL
+    end
 
     subgraph S3A["Stage 3A (主要路徑 90%): 專業 NLE 時間軸"]
-        S1_3 --> S3A_ACT["匯出 FCP7 XML 時間軸 (export_fcp7_xml.py)"]
-        EDL --> S3A_ACT
-        S3A_ACT --> XML["final_cut_full.xml<br/>(匯入 DaVinci Resolve / Premiere Pro / Final Cut Pro)"]
+        S3A_ACT["3A. 匯出 FCP7 XML 時間軸<br/>(1:1 同步母帶連結 & NTSC / Drop-Frame)"]:::stage3Style
+        XML["交付成果: final_cut_full.xml<br/>(匯入 DaVinci Resolve / Premiere Pro / Final Cut Pro)"]:::outputStyle
+        S3A_ACT --> XML
     end
 
     subgraph S3B["Stage 3B (次要路徑 10%): 直接渲染影片"]
-        S1_3 --> S3B_ACT["Stage 3B: 單次硬體加速渲染 (edl_to_video.py)"]
-        EDL --> S3B_ACT
-        S3B_ACT --> MP4["final_cut_full.mp4"]
+        S3B_ACT["3B. 單次硬體加速影片渲染<br/>(VideoToolbox / libx264)"]:::stage3Style
+        MP4["交付成果: final_cut_full.mp4<br/>(完整多機位粗剪影片)"]:::outputStyle
+        S3B_ACT --> MP4
     end
+
+    A --> S1_1
+    S1_4 --> S2_1
+    S1_3 --> S3A_ACT
+    EDL --> S3A_ACT
+    S1_3 --> S3B_ACT
+    EDL --> S3B_ACT
 ```
 
 ---

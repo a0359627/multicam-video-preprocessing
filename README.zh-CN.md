@@ -38,6 +38,61 @@ chmod +x setup.sh
 
 ---
 
+## 三阶段端到端工作流架构
+
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["输入多机位素材"]
+        A["原始多机位视频 (CAM1, CAM2 .. CAM6)<br/>(本地文件或 Google Drive 文件夹)"]:::inputStyle
+    end
+
+    subgraph S1["Stage 1: 多机位预处理与声学同步"]
+        S1_1["1.1 MFCC 声学对齐与亚帧微调 (<0.125 ms)"]:::stage1Style
+        S1_2["1.2 EBU R128 双阶段响度标准化 (-14 LUFS)"]:::stage1Style
+        S1_3["交付成果 / 母带: 完整同步母带<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
+        S1_4["中间产物: 多机合一全长网格视频<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_1 --> S1_2
+        S1_2 --> S1_3
+        S1_3 --> S1_4
+    end
+
+    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic 视频粗剪"]
+        S2_1["2.1 零切分 Agentic 视频推理<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+        S2_2["2.2 8 项确定性 EDL 语义验证<br/>(6 项 ERROR + 2 项 WARN 检查)"]:::stage2Style
+        EDL["中间产物: 统一剪辑决策表与验证报告<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
+        S2_1 --> S2_2
+        S2_2 --> EDL
+    end
+
+    subgraph S3A["Stage 3A (主要路径 90%): 专业 NLE 时间线"]
+        S3A_ACT["3A. 导出 FCP7 XML 时间线<br/>(1:1 同步母带链接 & NTSC / Drop-Frame)"]:::stage3Style
+        XML["交付成果: final_cut_full.xml<br/>(导入 DaVinci Resolve / Premiere Pro / Final Cut Pro)"]:::outputStyle
+        S3A_ACT --> XML
+    end
+
+    subgraph S3B["Stage 3B (次要路径 10%): 直接渲染视频"]
+        S3B_ACT["3B. 单次硬件加速视频渲染<br/>(VideoToolbox / libx264)"]:::stage3Style
+        MP4["交付成果: final_cut_full.mp4<br/>(完整多机位粗剪视频)"]:::outputStyle
+        S3B_ACT --> MP4
+    end
+
+    A --> S1_1
+    S1_4 --> S2_1
+    S1_3 --> S3A_ACT
+    EDL --> S3A_ACT
+    S1_3 --> S3B_ACT
+    EDL --> S3B_ACT
+```
+
+---
+
 ## 使用场景与 Agent 指令示例 (User Scenarios & Agent Prompts)
 
 ### 场景 1：导出专业 NLE XML 时间线（推荐主要工作流）
@@ -66,7 +121,7 @@ chmod +x setup.sh
 
 ---
 
-## 三阶段核心流程架构
+## 三阶段核心技术说明
 
 1. **Stage 1（多机位同步与预处理）**：执行 MFCC 声学时间对齐与亚帧微调（`<0.125 ms`）、EBU R128（`-14 LUFS`）双阶段线性响度标准化、逐帧精准同步母带导出（`CAM*_synced.mp4`）与零切分全长网格合成（`multicam_merged_full.mp4`）。
 2. **Stage 2（Gemini 3.8 Flash Agentic 粗剪决策）**：使用 **Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）对全长网格视频生成 `edl_full.csv`，自动剔除片头倒数与场记板，并执行 8 项确定性语义检查（`6 ERROR + 2 WARN`）。

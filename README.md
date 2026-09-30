@@ -75,27 +75,53 @@ multicam-video-preprocessing/
 
 ```mermaid
 flowchart TD
-    subgraph S1["Stage 1: Multicam Preprocessing (multicam_pipeline.py --normalize --merge)"]
-        A["Raw Footage (CAM1, CAM2...)"] --> S1_1["1.1 MFCC Acoustic Alignment & Subframe Refinement (<0.125 ms)"]
-        S1_1 --> S1_2["1.2 EBU R128 Loudness Normalization (-14 LUFS)"]
-        S1_2 --> S1_3["1.3 Export Full Synced Masters (CAM*_synced.mp4)"]
-        S1_3 --> S1_4["1.4 Multi-in-One Full Grid Composition (multicam_merged_full.mp4)"]
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["Input Multi-Camera Sources"]
+        A["Raw Camera Footage (CAM1, CAM2 .. CAM6)<br/>(Local Files or Google Drive Folder)"]:::inputStyle
     end
 
-    S1_4 --> S2["Stage 2: Gemini 3.8 Flash Agentic Video Rough-Cut<br/>(generate_edl.py + 8-Check Deterministic Validator)"]
-    S2 --> EDL["Unified EDL (edl_full.csv + edl_full_report.md)"]
+    subgraph S1["Stage 1: Multicam Preprocessing & Synchronization"]
+        S1_1["1.1 MFCC Acoustic Alignment & Subframe Refinement (<0.125 ms)"]:::stage1Style
+        S1_2["1.2 EBU R128 Two-Pass Loudness Normalization (-14 LUFS)"]:::stage1Style
+        S1_3["Deliverable / Master: Full Synced Camera Masters<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
+        S1_4["Artifact: Multi-in-One Full Grid Video<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_1 --> S1_2
+        S1_2 --> S1_3
+        S1_3 --> S1_4
+    end
+
+    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic Video Rough-Cut"]
+        S2_1["2.1 Zero-Split Agentic Video Inference<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+        S2_2["2.2 8-Check Deterministic EDL Semantic Validator<br/>(6 ERROR + 2 WARN Checks)"]:::stage2Style
+        EDL["Artifact: Unified EDL & Audit Report<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
+        S2_1 --> S2_2
+        S2_2 --> EDL
+    end
 
     subgraph S3A["Stage 3A (Primary 90%): NLE XML Timeline"]
-        S1_3 --> S3A_ACT["Export FCP7 XML Timeline (export_fcp7_xml.py)"]
-        EDL --> S3A_ACT
-        S3A_ACT --> XML["final_cut_full.xml<br/>(DaVinci Resolve / Premiere Pro / Final Cut Pro)"]
+        S3A_ACT["3A. Export FCP7 XML Timeline<br/>(1:1 Synced Master Linking & NTSC / Drop-Frame)"]:::stage3Style
+        XML["Deliverable: final_cut_full.xml<br/>(DaVinci Resolve / Premiere Pro / Final Cut Pro)"]:::outputStyle
+        S3A_ACT --> XML
     end
 
     subgraph S3B["Stage 3B (Secondary 10%): Direct Video Render"]
-        S1_3 --> S3B_ACT["Stage 3B: Single-Pass Hardware Render (edl_to_video.py)"]
-        EDL --> S3B_ACT
-        S3B_ACT --> MP4["final_cut_full.mp4"]
+        S3B_ACT["3B. Single-Pass Hardware Video Render<br/>(VideoToolbox / libx264)"]:::stage3Style
+        MP4["Deliverable: final_cut_full.mp4<br/>(Rendered Full Rough-Cut Video)"]:::outputStyle
+        S3B_ACT --> MP4
     end
+
+    A --> S1_1
+    S1_4 --> S2_1
+    S1_3 --> S3A_ACT
+    EDL --> S3A_ACT
+    S1_3 --> S3B_ACT
+    EDL --> S3B_ACT
 ```
 
 ---

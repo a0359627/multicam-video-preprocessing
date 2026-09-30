@@ -38,6 +38,61 @@ chmod +x setup.sh
 
 ---
 
+## 3 ステージ実行ワークフローアーキテクチャ
+
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["入力マルチカメラ素材"]
+        A["未編集マルチカメラ映像 (CAM1, CAM2 .. CAM6)<br/>(ローカルファイルまたは Google Drive フォルダ)"]:::inputStyle
+    end
+
+    subgraph S1["Stage 1: マルチカメラ前処理＆音響同期"]
+        S1_1["1.1 MFCC 音響アライメント＆サブフレーム微調整 (<0.125 ms)"]:::stage1Style
+        S1_2["1.2 EBU R128 2 パス線形ラウドネス正規化 (-14 LUFS)"]:::stage1Style
+        S1_3["成果物 / マスター: フレーム精度同期マスター<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
+        S1_4["中間アーティファクト: マルチインワン全編グリッド動画<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_1 --> S1_2
+        S1_2 --> S1_3
+        S1_3 --> S1_4
+    end
+
+    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic Video ラフカット"]
+        S2_1["2.1 ゼロ分割 Agentic Video 推論<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+        S2_2["2.2 8 項目決定論的 EDL 検証<br/>(6 ERROR + 2 WARN チェック)"]:::stage2Style
+        EDL["中間アーティファクト: 統合 EDL ＆検証レポート<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
+        S2_1 --> S2_2
+        S2_2 --> EDL
+    end
+
+    subgraph S3A["Stage 3A (主要ルート 90%): NLE XML タイムライン"]
+        S3A_ACT["3A. FCP7 XML タイムライン出力<br/>(1:1 同期マスターリンク & NTSC / Drop-Frame)"]:::stage3Style
+        XML["成果物: final_cut_full.xml<br/>(DaVinci Resolve / Premiere Pro / Final Cut Pro)"]:::outputStyle
+        S3A_ACT --> XML
+    end
+
+    subgraph S3B["Stage 3B (副ルート 10%): 直接動画レンダリング"]
+        S3B_ACT["3B. シングルパス・ハードウェアレンダリング<br/>(VideoToolbox / libx264)"]:::stage3Style
+        MP4["成果物: final_cut_full.mp4<br/>(レンダリング済みラフカット動画)"]:::outputStyle
+        S3B_ACT --> MP4
+    end
+
+    A --> S1_1
+    S1_4 --> S2_1
+    S1_3 --> S3A_ACT
+    EDL --> S3A_ACT
+    S1_3 --> S3B_ACT
+    EDL --> S3B_ACT
+```
+
+---
+
 ## 利用シナリオと Agent プロンプト例 (User Scenarios & Agent Prompts)
 
 ### シナリオ 1：NLE 用 FCP7 XML タイムライン出力（推奨メインワークフロー）
@@ -66,7 +121,7 @@ chmod +x setup.sh
 
 ---
 
-## 3 ステージ実行ワークフロー
+## 3 ステージ技術概要
 
 1. **Stage 1（マルチカメラ同期＆前処理）**：MFCC 音響アライメント＆サブフレーム微調整（`<0.125 ms`）、EBU R128（`-14 LUFS`）2 パス線形ラウドネス正規化、フレーム精度同期マスター出力（`CAM*_synced.mp4`）、およびゼロ分割グリッド合成（`multicam_merged_full.mp4`）を実行します。
 2. **Stage 2（Gemini 3.8 Flash Agentic Video ラフカット）**：**Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）でカウントダウンやカチンコを自動除去して `edl_full.csv` を生成し、8 項目の決定論的 EDL 検証（`6 ERROR + 2 WARN`）を実行します。
