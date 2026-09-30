@@ -24,9 +24,11 @@
   ```bash
   git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
   ```
-- **全域 Skill**：
+- **舊式單一 Skill 安裝（`~/.gemini/config/skills/`）**：
+  將儲存庫內的 `skills/multicam-video-preprocessing` 子目錄連結至舊版 Skills 目錄：
   ```bash
-  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/skills/multicam-video-preprocessing
+  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
+  ln -s ~/.gemini/config/plugins/multicam-video-preprocessing/skills/multicam-video-preprocessing ~/.gemini/config/skills/multicam-video-preprocessing
   ```
 
 ### 2. 安裝相依套件與一鍵配置雲端環境 (`setup.sh`)
@@ -61,10 +63,10 @@ multicam-video-preprocessing/
 │       │   └── modules/                                  # 聲學、視訊、驗證器與 GCP/Vertex AI 模組
 │       └── assets/                                       # 提示詞規範實體目錄 (SSOT)
 │           └── edl_interview_template.md                 # Gemini 多模態訪談粗剪規則
-├── scripts -> skills/multicam-video-preprocessing/scripts # 根目錄 POSIX Symlink（供 CLI 與測試直接引用）
-├── assets -> skills/multicam-video-preprocessing/assets   # 根目錄 POSIX Symlink
 ├── AGENTS.md                                             # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
-└── setup.sh                                              # 原生 gcloud 雲端環境一鍵配置腳本
+├── setup.sh                                              # 原生 gcloud 雲端環境一鍵配置腳本
+├── .env.example                                          # Vertex AI (ADC) 與 GCS 環境變數範本
+└── tests/                                                # 離線單元測試套件 (41 項測試)
 ```
 
 ---

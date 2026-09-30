@@ -24,9 +24,11 @@ This project complies with [Agent Plugins 1.0](https://agent-plugins.org/) and r
   ```bash
   git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
   ```
-- **Global Skill**:
+- **Legacy Single-Skill Installation (`~/.gemini/config/skills/`)**:
+  Link the inner `skills/multicam-video-preprocessing` directory into the legacy skills directory:
   ```bash
-  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/skills/multicam-video-preprocessing
+  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
+  ln -s ~/.gemini/config/plugins/multicam-video-preprocessing/skills/multicam-video-preprocessing ~/.gemini/config/skills/multicam-video-preprocessing
   ```
 
 ### 2. Install Dependencies and Provision Cloud Resources (`setup.sh`)
@@ -61,8 +63,6 @@ multicam-video-preprocessing/
 │       │   └── modules/                                  # Acoustic, video, validator, and GCP/Vertex AI modules
 │       └── assets/                                       # Canonical prompt templates (SSOT)
 │           └── edl_interview_template.md                 # Gemini multimodal interview rough-cut rules
-├── scripts -> skills/multicam-video-preprocessing/scripts # Root POSIX symlink for CLI & test compatibility
-├── assets -> skills/multicam-video-preprocessing/assets   # Root POSIX symlink for prompt resolution
 ├── AGENTS.md                                             # Workspace & engineering development rules (Part I & Part II)
 ├── setup.sh                                              # Native gcloud setup script (GCS, Lifecycle, IAM, .env)
 ├── .env.example                                          # Vertex AI (ADC) and GCS configuration template

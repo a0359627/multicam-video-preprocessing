@@ -58,7 +58,7 @@ Universal end-to-end toolkit for multi-camera video production (2 to 6 Cameras),
 
 ## 3-Stage Gated Execution Runbook
 
-When executing a multi-camera task, follow this sequential 3-stage gated workflow. Resolve `${SKILL_DIR}` to the directory containing this `SKILL.md` (or the repository root).
+When executing a multi-camera task, follow this sequential 3-stage gated workflow. Resolve `${SKILL_DIR}` to the directory containing this `SKILL.md` (`skills/multicam-video-preprocessing`).
 
 ```mermaid
 flowchart TD

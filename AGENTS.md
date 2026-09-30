@@ -7,13 +7,13 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 ## Part I: Operational Invariants (When Executing Multi-Camera Tasks)
 
 1. **Strict Toolset Execution Only (No Ad-Hoc Scripts)**:
-   - Execute all video preprocessing, EDL rough-cutting, XML exporting, and rendering exclusively via the official scripts in `scripts/`. Writing temporary Python scripts or custom audio/video synchronization logic is **STRICTLY FORBIDDEN**.
+   - Execute all video preprocessing, EDL rough-cutting, XML exporting, and rendering exclusively via the official scripts in `skills/multicam-video-preprocessing/scripts/`. Writing temporary Python scripts or custom audio/video synchronization logic is **STRICTLY FORBIDDEN**.
 2. **Mandatory 3-Stage Gated Workflow (Zero-Split Agentic Architecture)**:
    - Follow the 3-Stage Gated Runbook defined in [SKILL.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/SKILL.md):
-     - **Stage 1**: `scripts/multicam_pipeline.py --normalize --merge` (MFCC `<0.125ms` sync + EBU R128 `-14 LUFS` + synced masters + `multicam_merged_full.mp4`).
-     - **Stage 2**: `scripts/generate_edl.py` (Vertex AI Gemini 3.8 Flash Agentic Video `processing="agentic"` on full-length grid video + 8-check deterministic EDL semantic validation).
-     - **Stage 3A (Primary 90%)**: `scripts/export_fcp7_xml.py` (`final_cut_full.xml` for DaVinci Resolve / Premiere Pro / Final Cut Pro).
-     - **Stage 3B (Secondary 10%)**: `scripts/edl_to_video.py` (`final_cut_full.mp4` single-pass hardware render).
+     - **Stage 1**: `skills/multicam-video-preprocessing/scripts/multicam_pipeline.py --normalize --merge` (MFCC `<0.125ms` sync + EBU R128 `-14 LUFS` + synced masters + `multicam_merged_full.mp4`).
+     - **Stage 2**: `skills/multicam-video-preprocessing/scripts/generate_edl.py` (Vertex AI Gemini 3.8 Flash Agentic Video `processing="agentic"` on full-length grid video + 8-check deterministic EDL semantic validation).
+     - **Stage 3A (Primary 90%)**: `skills/multicam-video-preprocessing/scripts/export_fcp7_xml.py` (`final_cut_full.xml` for DaVinci Resolve / Premiere Pro / Final Cut Pro).
+     - **Stage 3B (Secondary 10%)**: `skills/multicam-video-preprocessing/scripts/edl_to_video.py` (`final_cut_full.mp4` single-pass hardware render).
 3. **Fail-Fast & Exit Gate Verification**:
    - If any script exits with a non-zero status (e.g., missing ADC credentials, 403/401 GCS/Vertex AI permission error, or `--strict-edl` validation failure), stop immediately, report the exact error, and instruct the user to run `./setup.sh --project YOUR_PROJECT_ID` or `gcloud auth application-default login`.
    - Never declare completion until all required stage output files exist on disk and are non-empty (`> 0 bytes`).
@@ -26,10 +26,9 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 
 When modifying code, prompts, infrastructure scripts, or documentation in this repository, you MUST adhere to the following engineering standards:
 
-### 1. Single Source of Truth (SSOT) & Symlink Integrity
+### 1. Single Source of Truth (SSOT) Directory Architecture (Agent Plugins 1.0 Specification)
 - **Canonical Code Location**: All core scripts (`scripts/*.py`), modules (`scripts/modules/*.py`), and prompt templates (`assets/*.md`) reside inside `skills/multicam-video-preprocessing/scripts/` and `skills/multicam-video-preprocessing/assets/`.
-- **Root Symlinks**: Top-level `scripts` and `assets` at the repository root are POSIX symlinks pointing to `skills/multicam-video-preprocessing/scripts` and `skills/multicam-video-preprocessing/assets`.
-- **Rule**: Always edit files under `skills/multicam-video-preprocessing/scripts/` and `skills/multicam-video-preprocessing/assets/`. Never replace root symlinks with duplicate physical directories.
+- **Rule**: Always edit files under `skills/multicam-video-preprocessing/scripts/` and `skills/multicam-video-preprocessing/assets/`. Do not create root-level symlinks or duplicate physical directories at the repository root.
 
 ### 2. 100% Google Cloud Vertex AI (ADC) + GCS Architecture
 - **Zero API Key Policy**: All Gemini model invocations in [llm_client.py](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/scripts/modules/llm_client.py) and [gcp_client.py](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/scripts/modules/gcp_client.py) MUST use `genai.Client(vertexai=True, project=..., location=...)` authenticated via Application Default Credentials (ADC), defaulting to `GOOGLE_CLOUD_LOCATION=global`.
