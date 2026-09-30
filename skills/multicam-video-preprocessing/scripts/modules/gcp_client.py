@@ -14,8 +14,13 @@ import time
 from urllib.parse import urlparse
 
 try:
-    from google.cloud import storage
     import google.auth
+    HAS_GOOGLE_AUTH = True
+except ImportError:
+    HAS_GOOGLE_AUTH = False
+
+try:
+    from google.cloud import storage
     HAS_GCP_STORAGE = True
 except ImportError:
     HAS_GCP_STORAGE = False

@@ -6,11 +6,11 @@
 
 > [!IMPORTANT]
 > **Google Antigravity 原生技能与工作流套件**  
-> 本工具集为 **Google Antigravity**（由 **Vertex AI Gemini 3.8 Flash** 驱动）与专业非线性剪辑软件（**DaVinci Resolve**、**Adobe Premiere Pro**、**Final Cut Pro**）打造四阶段多机位预处理与 AI 粗剪工作流。
+> 本工具集为 **Google Antigravity**（由 **Vertex AI Gemini 3.8 Flash** 驱动）与专业非线性剪辑软件（**DaVinci Resolve**、**Adobe Premiere Pro**、**Final Cut Pro**）打造三阶段多机位预处理与 AI 粗剪工作流。
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** 支持 2 至 6 机位音频对齐、广播级响度标准化、AI 粗剪时间线生成与 YouTube 字幕校对。可在 Antigravity 对话窗口使用自然语言下达指令，或通过终端 CLI 运行。
+**Multi-Camera Video Pipeline & AI Editing Suite** 支持 2 至 6 机位音频对齐、广播级响度标准化、AI 粗剪时间线生成与多机位预览视频渲染。可在 Antigravity 对话窗口使用自然语言下达指令，或通过终端 CLI 运行。
 
 ---
 
@@ -24,7 +24,7 @@ git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini
 
 # 2. 安装依赖与授权 ADC
 brew install ffmpeg
-pip install numpy google-genai google-cloud-storage mlx-whisper requests
+pip install numpy google-genai google-cloud-storage requests
 gcloud auth application-default login
 
 # 3. 运行 setup.sh 配置 GCS 存储桶、双层生命周期规则（raw: 2 天，交付物: 15 天）、IAM 与 .env
@@ -38,7 +38,7 @@ chmod +x setup.sh
 
 ---
 
-## 四阶段核心流程与 CLI 命令
+## 三阶段核心流程与 CLI 命令
 
 ### Stage 1：多机位同步与预处理 (`multicam_pipeline.py`)
 1. **MFCC 声学时间对齐与亚帧微调（`<0.125 ms`）**：支持三阶扫描与 `--strict-sync` 低置信度拦截。
@@ -69,22 +69,14 @@ python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_fu
 python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl
 ```
 
-### Stage 4：三阶段黄金字幕管线 (`generate_subtitles.py`)
-结合 **Vertex AI 1M 全局术语表**、**Whisper 逐字时间戳** 与 **Gemini 多模态音频切片校对 + 8 维度流媒体质量审核**：
-
-```bash
-python3 scripts/generate_subtitles.py -i output/final_cut_full.mp4 --language zh-CN
-```
-
 ---
 
 ## Google Drive 直连与 GCS 双层生命周期规则
 
 | GCS 路径前缀 (`matchesPrefix`) | 存储对象 | 保留天数 (`age`) | 清理机制 |
 | :--- | :--- | :--- | :--- |
-| **`raw/audio_chunks/`** | Stage 4.3 音频切片 | **推理后立即删除** | 每个分块完成后在 Python `finally` 块中立即删除。 |
-| **`raw/`** | 暂存网格视频与完整音轨 | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 缓存复用，期满自动删除。 |
-| **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 时间线、SRT/VTT 字幕与报告 | **15 天 (`age: 15`)** | 保留 15 天供团队审阅，期满自动清理。 |
+| **`raw/`** | 暂存网格视频 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 缓存复用，期满自动删除。 |
+| **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 时间线、渲染视频与验证报告 | **15 天 (`age: 15`)** | 保留 15 天供团队审阅，期满自动清理。 |
 
 ---
 

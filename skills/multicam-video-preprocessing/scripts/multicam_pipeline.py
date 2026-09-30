@@ -182,7 +182,7 @@ def main():
             )
         lines.extend([
             "",
-            "The exported masters, merged grid video, and subsequent AI EDL/subtitles",
+            "The exported masters, merged grid video, and subsequent AI EDL timeline",
             "will inherit this misalignment!",
             "Common causes:",
             "  - Cameras share no audible content or one recording is silent.",

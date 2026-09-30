@@ -6,11 +6,11 @@
 
 > [!IMPORTANT]
 > **Google Antigravity Native Plugin & Workflow Suite**  
-> This toolkit provides a 4-stage multi-camera preprocessing and AI rough-cut workflow for **Google Antigravity** (powered by **Vertex AI Gemini 3.8 Flash**) and professional NLE systems (**DaVinci Resolve**, **Adobe Premiere Pro**, and **Final Cut Pro**).
+> This toolkit provides a 3-stage multi-camera preprocessing and AI rough-cut workflow for **Google Antigravity** (powered by **Vertex AI Gemini 3.8 Flash**) and professional NLE systems (**DaVinci Resolve**, **Adobe Premiere Pro**, and **Final Cut Pro**).
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** synchronizes 2 to 6 camera angles, normalizes broadcast loudness, generates AI rough-cut timelines, and produces YouTube subtitles. Instruct the Antigravity Agent in natural language or run the CLI scripts directly.
+**Multi-Camera Video Pipeline & AI Editing Suite** synchronizes 2 to 6 camera angles, normalizes broadcast loudness, generates AI rough-cut timelines, and renders multi-camera preview videos. Instruct the Antigravity Agent in natural language or run the CLI scripts directly.
 
 ---
 
@@ -34,7 +34,7 @@ This project complies with [Agent Plugins 1.0](https://agent-plugins.org/) and r
 ```bash
 # 1. Install FFmpeg and Python packages
 brew install ffmpeg
-pip install numpy google-genai google-cloud-storage mlx-whisper requests
+pip install numpy google-genai google-cloud-storage requests
 
 # 2. Authenticate Application Default Credentials (ADC)
 gcloud auth application-default login
@@ -52,17 +52,15 @@ multicam-video-preprocessing/
 │   └── AGENTS.md                                         # Packaged client execution invariants (<PLUGIN_ROOT> direct CLI & fail-fast)
 ├── skills/
 │   └── multicam-video-preprocessing/                     # Canonical Skill Bundle (Single Source of Truth)
-│       ├── SKILL.md                                      # Antigravity skill manifest and 4-stage gated runbook
+│       ├── SKILL.md                                      # Antigravity skill manifest and 3-stage gated runbook
 │       ├── scripts/                                      # Canonical execution scripts & modules (SSOT)
 │       │   ├── multicam_pipeline.py                      # Stage 1: MFCC sync, -14 LUFS norm, synced masters, grid merge
 │       │   ├── generate_edl.py                           # Stage 2: Vertex AI Gemini 3.8 Flash Agentic Video EDL generation
 │       │   ├── export_fcp7_xml.py                        # Stage 3A: FCP7 XML timeline export (Primary)
 │       │   ├── edl_to_video.py                           # Stage 3B: Single-pass hardware video rendering (Secondary)
-│       │   ├── generate_subtitles.py                     # Stage 4: 3-stage YouTube subtitle generation
 │       │   └── modules/                                  # Acoustic, video, validator, and GCP/Vertex AI modules
 │       └── assets/                                       # Canonical prompt templates (SSOT)
-│           ├── edl_interview_template.md                 # Gemini multimodal interview rough-cut rules
-│           └── subtitle_proofread_template.*.md          # Multi-locale YouTube subtitle proofreading rules
+│           └── edl_interview_template.md                 # Gemini multimodal interview rough-cut rules
 ├── scripts -> skills/multicam-video-preprocessing/scripts # Root POSIX symlink for CLI & test compatibility
 ├── assets -> skills/multicam-video-preprocessing/assets   # Root POSIX symlink for prompt resolution
 ├── AGENTS.md                                             # Workspace & engineering development rules (Part I & Part II)
@@ -73,7 +71,7 @@ multicam-video-preprocessing/
 
 ---
 
-## End-to-End 4-Stage Workflow Architecture
+## End-to-End 3-Stage Workflow Architecture
 
 ```mermaid
 flowchart TD
@@ -93,12 +91,10 @@ flowchart TD
         S3A_ACT --> XML["final_cut_full.xml<br/>(DaVinci Resolve / Premiere Pro / Final Cut Pro)"]
     end
 
-    subgraph S3B["Stage 3B & Stage 4 (Secondary 10%): Rendered Video & Subtitles"]
+    subgraph S3B["Stage 3B (Secondary 10%): Direct Video Render"]
         S1_3 --> S3B_ACT["Stage 3B: Single-Pass Hardware Render (edl_to_video.py)"]
         EDL --> S3B_ACT
         S3B_ACT --> MP4["final_cut_full.mp4"]
-        MP4 --> S4["Stage 4: 3-Stage YouTube Subtitles (generate_subtitles.py)"]
-        S4 --> SRT["final_cut_full.srt / .vtt + Quality Audit Report"]
     end
 ```
 
@@ -118,21 +114,13 @@ flowchart TD
   2. Drag `output/CAM1_synced.mp4` and `output/CAM2_synced.mp4` into the **Media Pool**.
   3. Select **File -> Import -> Timeline...** (`Cmd + Shift + I`) and choose `final_cut_full.xml`.
 
-### Scenario 2: Direct Video Render and YouTube Subtitles
-- **Use Case**: Render a finished MP4 preview and proofread YouTube subtitles without opening an NLE.
+### Scenario 2: Direct Video Render
+- **Use Case**: Render a finished MP4 rough-cut video without opening an NLE.
 - **Agent Prompt**:
-  > *"Rough-cut these multi-camera videos, render `final_cut_full.mp4`, and generate proofread YouTube subtitles."*
+  > *"Rough-cut these multi-camera videos and render `final_cut_full.mp4` directly."*
 - **Deliverables**:
   1. `final_cut_full.mp4` (Single-pass hardware-rendered full video).
-  2. `final_cut_full.srt` and `final_cut_full.vtt` (Whisper word timestamps + Gemini proofreading).
-
-### Scenario 3: Standalone Subtitles for an Existing Video
-- **Use Case**: Generate millisecond-accurate, terminology-verified subtitles for an existing video file.
-- **Agent Prompt**:
-  > *"Generate YouTube subtitles for `output/final_cut_full.mp4` and proofread homophones and technical terms."*
-- **Deliverables**:
-  1. `final_cut_full.srt` and `final_cut_full.vtt`.
-  2. `final_cut_full_subtitle_report.md` and `final_cut_full_subtitle_report.json`.
+  2. `edl_full.csv` and `edl_full_report.md` (Camera switching decisions and semantic validation report).
 
 ---
 
@@ -216,22 +204,6 @@ python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_fu
 
 ---
 
-### Stage 4: Three-Stage Golden Subtitle Pipeline (`generate_subtitles.py`)
-
-1. **Stage 4.1 (Vertex AI 1M Global Glossary & Initial Prompt)**:
-   - Scans the full episode audio with **Gemini 3.8 Flash** to build `final_cut_full_glossary.md` and a `<200`-token Whisper `initial_prompt`.
-2. **Stage 4.2 (Whisper Word-Level Acoustic Ground Truth)**:
-   - Runs `mlx-whisper` or `faster-whisper` (`word_timestamps=True`) to extract millisecond word boundaries (`final_cut_full_words.json`).
-3. **Stage 4.3 (Silence-Aware Chunking & Multimodal Audio Proofreading)**:
-   - Splits segments at natural pauses ($\ge 0.4\text{ s}$), proofreads homophones and terms against raw audio slices, snaps sub-clause timestamps to physical word boundaries, and runs an **8-dimension Netflix/YouTube quality audit**.
-
-```bash
-# Standard subtitle generation:
-python3 scripts/generate_subtitles.py -i output/final_cut_full.mp4 --language zh-TW
-```
-
----
-
 ## Google Drive Direct Links & Two-Tier GCS Lifecycle Policy
 
 ### 1. Supported Google Drive Scenarios (`drive.readonly` ADC)
@@ -241,15 +213,13 @@ python3 scripts/generate_subtitles.py -i output/final_cut_full.mp4 --language zh
 | **Scenario A: Multi-Cam Folder Link** | `multicam_pipeline.py --gdrive-folder "FOLDER_URL"` | Lists all camera videos via Drive API v3, sorts `CAM1..CAMn` naturally, verifies `md5Checksum`, and caches in `gdrive_inputs/`. |
 | **Scenario B: Individual Camera Links** | `multicam_pipeline.py --ref "CAM1_URL" --targets "CAM2_URL"` | Verifies remote MD5, recovers UTF-8 CJK filenames, and caches locally for subframe alignment. |
 | **Scenario C: Grid Video to EDL** | `generate_edl.py -v "GDRIVE_VIDEO_URL"` | Matches remote `gdrive_md5` against GCS blob metadata to skip redundant transfers. |
-| **Scenario D: Video to Subtitles** | `generate_subtitles.py -i "GDRIVE_VIDEO_URL"` | Downloads with MD5 caching and runs the 3-stage subtitle pipeline. |
 
 ### 2. Two-Tier GCS Bucket Lifecycle Policy (`gs://multicam-video-${PROJECT_ID}`)
 
 | GCS Prefix (`matchesPrefix`) | Stored Objects | Retention (`age`) | Cleanup Mechanism |
 | :--- | :--- | :--- | :--- |
-| **`raw/audio_chunks/`** | Stage 4.3 audio slices | **Immediate** | Deleted in Python `finally` blocks immediately after each chunk completes. |
-| **`raw/`** | Staged grid video and episode audio | **2 Days (`age: 2`)** | Retains SHA-256 cached staging media for 2 days, then deletes automatically. |
-| **`output/`**, **`deliverables/`**, **`multicam_assets/`** | XML/CSV timelines, SRT/VTT subtitles, reports | **15 Days (`age: 15`)** | Retains deliverables for 15 days for team review before automatic deletion. |
+| **`raw/`** | Staged grid video (`multicam_merged_full.mp4`) | **2 Days (`age: 2`)** | Retains SHA-256 cached staging media for 2 days, then deletes automatically. |
+| **`output/`**, **`deliverables/`**, **`multicam_assets/`** | XML/CSV timelines, rendered videos, and reports | **15 Days (`age: 15`)** | Retains deliverables for 15 days for team review before automatic deletion. |
 
 ---
 

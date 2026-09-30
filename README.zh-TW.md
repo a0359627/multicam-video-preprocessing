@@ -6,11 +6,11 @@
 
 > [!IMPORTANT]
 > **Google Antigravity 原生技能與工作流套件**  
-> 本工具組為 **Google Antigravity**（由 **Vertex AI Gemini 3.8 Flash** 驅動）與專業非線性剪輯軟體（**DaVinci Resolve**、**Adobe Premiere Pro**、**Final Cut Pro**）量身打造的四階段多機位前處理與 AI 粗剪套件。
+> 本工具組為 **Google Antigravity**（由 **Vertex AI Gemini 3.8 Flash** 驅動）與專業非線性剪輯軟體（**DaVinci Resolve**、**Adobe Premiere Pro**、**Final Cut Pro**）量身打造的三階段多機位前處理與 AI 粗剪套件。
 
 ---
 
-**Multi-Camera Video Pipeline & AI Editing Suite** 支援 2 至 6 機位音訊同步、廣播級響度標準化、AI 智慧粗剪時間軸生成與 YouTube 字幕校對。可直接於 Antigravity 對話視窗以自然語言下達指令，或透過終端機 CLI 執行。
+**Multi-Camera Video Pipeline & AI Editing Suite** 支援 2 至 6 機位音訊同步、廣播級響度標準化、AI 智慧粗剪時間軸生成與多機位預覽影片渲染。可直接於 Antigravity 對話視窗以自然語言下達指令，或透過終端機 CLI 執行。
 
 ---
 
@@ -34,7 +34,7 @@
 ```bash
 # 1. 安裝 FFmpeg 與 Python 套件
 brew install ffmpeg
-pip install numpy google-genai google-cloud-storage mlx-whisper requests
+pip install numpy google-genai google-cloud-storage requests
 
 # 2. 授權 Google Cloud ADC 憑證
 gcloud auth application-default login
@@ -52,9 +52,15 @@ multicam-video-preprocessing/
 │   └── AGENTS.md                                         # 打包於 Plugin 內的客戶端執行期守則（唯讀、直接呼叫 CLI 與 Fail-Fast）
 ├── skills/
 │   └── multicam-video-preprocessing/                     # 標準技能套件主幹（Single Source of Truth）
-│       ├── SKILL.md                                      # 技能規範與四階段自動化執行手冊
+│       ├── SKILL.md                                      # 技能規範與三階段自動化執行手冊
 │       ├── scripts/                                      # 核心執行腳本與模組實體目錄 (SSOT)
+│       │   ├── multicam_pipeline.py                      # Stage 1: MFCC 同步、-14 LUFS 響度標準化、同步母帶、網格合成
+│       │   ├── generate_edl.py                           # Stage 2: Vertex AI Gemini 3.8 Flash Agentic 影片 EDL 生成
+│       │   ├── export_fcp7_xml.py                        # Stage 3A: FCP7 XML 時間軸匯出（主要路徑）
+│       │   ├── edl_to_video.py                           # Stage 3B: 單次硬體加速影片渲染（次要路徑）
+│       │   └── modules/                                  # 聲學、視訊、驗證器與 GCP/Vertex AI 模組
 │       └── assets/                                       # 提示詞規範實體目錄 (SSOT)
+│           └── edl_interview_template.md                 # Gemini 多模態訪談粗剪規則
 ├── scripts -> skills/multicam-video-preprocessing/scripts # 根目錄 POSIX Symlink（供 CLI 與測試直接引用）
 ├── assets -> skills/multicam-video-preprocessing/assets   # 根目錄 POSIX Symlink
 ├── AGENTS.md                                             # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
@@ -63,7 +69,7 @@ multicam-video-preprocessing/
 
 ---
 
-## 四階段端到端工作流架構
+## 三階段端到端工作流架構
 
 ```mermaid
 flowchart TD
@@ -83,18 +89,16 @@ flowchart TD
         S3A_ACT --> XML["final_cut_full.xml<br/>(匯入 DaVinci Resolve / Premiere Pro / Final Cut Pro)"]
     end
 
-    subgraph S3B["Stage 3B & Stage 4 (次要路徑 10%): 直接渲染影片與字幕"]
+    subgraph S3B["Stage 3B (次要路徑 10%): 直接渲染影片"]
         S1_3 --> S3B_ACT["Stage 3B: 單次硬體加速渲染 (edl_to_video.py)"]
         EDL --> S3B_ACT
         S3B_ACT --> MP4["final_cut_full.mp4"]
-        MP4 --> S4["Stage 4: 三階段 YouTube 字幕生成 (generate_subtitles.py)"]
-        S4 --> SRT["final_cut_full.srt / .vtt + 品質審核報告"]
     end
 ```
 
 ---
 
-## 四階段核心功能與 CLI 指令
+## 三階段核心功能與 CLI 指令
 
 ### Stage 1：多機位同步與前處理 (`multicam_pipeline.py`)
 1. **MFCC 聲學時間對齊與次影格微調（`<0.125 ms`）**：採用三階掃描（120 秒快速掃描 $\rightarrow$ 全長 MFCC $\rightarrow$ 原始波形 1D FFT）並將精準度鎖定至單一音訊取樣點。支援 `--strict-sync` 低信心度自動攔截。
@@ -129,22 +133,14 @@ python3 scripts/export_fcp7_xml.py -e output/edl_full.csv -o output/final_cut_fu
 python3 scripts/edl_to_video.py --edl output/edl_full.csv -o output/final_cut_full.mp4 --strict-edl --lang zh-TW
 ```
 
-### Stage 4：三階段黃金字幕管線 (`generate_subtitles.py`)
-結合 **Stage 4.1（Vertex AI 1M 全域詞彙表與 Whisper 初始提示詞）**、**Stage 4.2（Whisper 毫秒級逐字時間戳）** 與 **Stage 4.3（靜音感知分塊、多模態音訊校對與 8 維度串流品質審核）**：
-
-```bash
-python3 scripts/generate_subtitles.py -i output/final_cut_full.mp4 --language zh-TW
-```
-
 ---
 
 ## Google Drive 分享連結與 GCS 雙層生命週期規則
 
 | GCS 路徑前綴 (`matchesPrefix`) | 儲存內容 | 保留天數 (`age`) | 清理機制 |
 | :--- | :--- | :--- | :--- |
-| **`raw/audio_chunks/`** | Stage 4.3 音訊切片 | **推論後立即刪除** | 每個區塊完成後於 Python `finally` 立即刪除。 |
-| **`raw/`** | 暫存網格影片與完整音軌 | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 快取重用，期滿自動刪除。 |
-| **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 時間軸、SRT/VTT 字幕與報告 | **15 天 (`age: 15`)** | 保留 15 天供團隊下載與審閱，期滿自動清理。 |
+| **`raw/`** | 暫存網格影片 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 快取重用，期滿自動刪除。 |
+| **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 時間軸、渲染成品與驗證報告 | **15 天 (`age: 15`)** | 保留 15 天供團隊下載與審閱，期滿自動清理。 |
 
 ---
 
