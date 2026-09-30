@@ -57,16 +57,16 @@ multicam-video-preprocessing/
 │       ├── SKILL.md                                      # 技能規範與三階段自動化執行手冊
 │       ├── scripts/                                      # 核心執行腳本與模組實體目錄 (SSOT)
 │       │   ├── multicam_pipeline.py                      # Stage 1: MFCC 同步、-14 LUFS 響度標準化、同步母帶、網格合成
-│       │   ├── generate_edl.py                           # Stage 2: Vertex AI Gemini 3.8 Flash Agentic 影片 EDL 生成
+│       │   ├── generate_edl.py                           # Stage 2: Vertex AI Gemini 3.8 Flash 多模態粗剪與智慧靜音分段
 │       │   ├── export_fcp7_xml.py                        # Stage 3A: FCP7 XML 時間軸匯出（主要路徑）
 │       │   ├── edl_to_video.py                           # Stage 3B: 單次硬體加速影片渲染（次要路徑）
-│       │   └── modules/                                  # 聲學、視訊、驗證器與 GCP/Vertex AI 模組
+│       │   └── modules/                                  # 聲學、視訊、靜音分段、驗證器與 GCP/Vertex AI 模組
 │       └── assets/                                       # 提示詞規範實體目錄 (SSOT)
 │           └── edl_interview_template.md                 # Gemini 多模態訪談粗剪規則
 ├── AGENTS.md                                             # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                              # 原生 gcloud 雲端環境一鍵配置腳本
 ├── .env.example                                          # Vertex AI (ADC) 與 GCS 環境變數範本
-└── tests/                                                # 離線單元測試套件 (41 項測試)
+└── tests/                                                # 離線單元測試套件 (46 項測試)
 ```
 
 ---
@@ -90,14 +90,14 @@ flowchart TD
         S1_1["1.1 MFCC 聲學對齊與次影格微調 (<0.125 ms)"]:::stage1Style
         S1_2["1.2 EBU R128 雙階段響度標準化 (-14 LUFS)"]:::stage1Style
         S1_3["交付成果 / 母帶: 完整同步母帶<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
-        S1_4["中繼產物: 多機合一完整網格影片<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_4["中繼產物: 多機合一完整網格影片<br/>(multicam_merged_full.mp4, 10 fps / 1s GOP)"]:::artifactStyle
         S1_1 --> S1_2
         S1_2 --> S1_3
         S1_3 --> S1_4
     end
 
-    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic 影片粗剪"]
-        S2_1["2.1 零切分 Agentic 影片推論<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+    subgraph S2["Stage 2: Gemini 3.8 Flash 多模態影片粗剪"]
+        S2_1["2.1 靜音感知智慧分段 (30-40 分鐘) 與平行推論<br/>(MEDIA_RESOLUTION_LOW + 動態 Thinking Budget)"]:::stage2Style
         S2_2["2.2 8 項確定性 EDL 語意驗證<br/>(6 項 ERROR + 2 項 WARN 檢查)"]:::stage2Style
         EDL["中繼產物: 統一剪輯決策表與驗證報告<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
         S2_1 --> S2_2
@@ -163,12 +163,14 @@ flowchart TD
 ### Stage 1：多機位同步與前處理
 1. **MFCC 聲學時間對齊與次影格微調（`<0.125 ms`）**：採用三階掃描（120 秒快速掃描 $\rightarrow$ 全長 MFCC $\rightarrow$ 原始波形 1D FFT）並將精準度鎖定至單一音訊取樣點。
 2. **EBU R128 (`-14 LUFS`) 雙階段線性響度標準化**：第一階段測量 `I`、`LRA` 與 `TP`，第二階段套用純線性增益（`linear=true`），消除動態壓縮呼吸感。
-3. **逐幀精準同步母帶匯出 (`CAM*_synced.mp4`)**：預設採用硬體加速重編碼（`h264_videotoolbox` 或 `libx264 -crf 18`），杜絕關鍵影格偏移。
-4. **零切分全長網格合成 (`multicam_merged_full.mp4`)**：將 2 至 6 機位合成為單一多視角畫布（$\le 1920 \times 1080$，每機位 $\ge 640 \times 480$）。
+3. **逐幀精準同步母帶匯出 (`CAM*_synced.mp4`)**：預設採用硬體加速重編碼（`h264_videotoolbox` 或 `libx264 -crf 18`，`20 Mbps`），杜絕關鍵影格偏移。
+4. **全長輕量網格合成 (`multicam_merged_full.mp4`)**：將 2 至 6 機位合成為單一多視角畫布（$\le 1920 \times 1080$，每機位 $\ge 640 \times 480$），採用 `10 fps`、`1.2 Mbps` 與 1 秒短 GOP（`-g 10`）編碼，支援秒級無損切分與高速雲端讀取。
 
-### Stage 2：Gemini 3.8 Flash Agentic 粗剪決策
-1. **片頭倒數與場記板零容忍剔除**：自動切除開拍倒數並驗證 `[Global_Start_Time, Global_Start_Time + 2.0s]` 區間。
-2. **零切分 Agentic 影片推論**：直接將全長網格影片送入 **Vertex AI Gemini 3.8 Flash**（`processing="agentic"`），減少 99.7% Token 消耗。
+### Stage 2：Gemini 3.8 Flash 多模態粗剪決策與靜音感知智慧分段
+1. **片頭倒數與場記板零容忍剔除**：自動切除開拍倒數並驗證 `[Global_Start_Time, Global_Start_Time + 2.0s]` 區間，同時於 `Global_End_Time` 切除收工閒聊。
+2. **標準多模態推論與靜音感知智慧分段（30–40 分鐘視窗）**：
+   - 預設採用 **Vertex AI Gemini 3.8 Flash** 標準多模態模式（`--processing standard`，`MEDIA_RESOLUTION_LOW` + 動態 `thinking_budget` `1024–4096`）。
+   - 當影片長度超過 40 分鐘（`2400s`）時，`generate_edl.py` 內部自動透過 `ffmpeg silencedetect` 與 RMS 能量波谷偵測自然語音停頓點，無損切分（`-c copy`）至暫存目錄 `<output_dir>/_edl_chunks/` 並平行上傳至 `gs://<bucket>/raw/edl_chunks/` 推論，完成後自動平移時間碼並縫合為單一 `edl_full.csv`，最後於 `finally` 區塊自動清除本機與雲端暫存分段檔。
 3. **8 項確定性 EDL 語意驗證**：檢查 `E_NO_ROWS`、`E_PARSE_TIME`、`E_NEGATIVE_DURATION`、`E_NON_MONOTONIC`、`E_OVERLAP`、`E_EMPTY_CAMERA`、`W_UNKNOWN_CAMERA` 與 `W_GAP`，並產出 `edl_full.csv` 與 `edl_full_report.md`。
 
 ### Stage 3A & 3B：匯出 FCP7 XML 時間軸與硬體加速渲染
@@ -181,7 +183,7 @@ flowchart TD
 
 | GCS 路徑前綴 (`matchesPrefix`) | 儲存內容 | 保留天數 (`age`) | 清理機制 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 暫存網格影片 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 快取重用，期滿自動刪除。 |
+| **`raw/`** | 暫存網格影片 (`multicam_merged_full.mp4`) 與分段檔 (`raw/edl_chunks/*`) | **2 天 (`age: 2`)** | `raw/edl_chunks/*` 於推論結束後立即由 `finally` 刪除；全長檔案保留 2 天供 SHA-256 快取重用，期滿自動刪除。 |
 | **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 時間軸、渲染成品與驗證報告 | **15 天 (`age: 15`)** | 保留 15 天供團隊下載與審閱，期滿自動清理。 |
 
 ---

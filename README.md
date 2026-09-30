@@ -57,16 +57,16 @@ multicam-video-preprocessing/
 │       ├── SKILL.md                                      # Antigravity skill manifest and 3-stage gated runbook
 │       ├── scripts/                                      # Canonical execution scripts & modules (SSOT)
 │       │   ├── multicam_pipeline.py                      # Stage 1: MFCC sync, -14 LUFS norm, synced masters, grid merge
-│       │   ├── generate_edl.py                           # Stage 2: Vertex AI Gemini 3.8 Flash Agentic Video EDL generation
+│       │   ├── generate_edl.py                           # Stage 2: Vertex AI Gemini 3.8 Flash EDL generation & smart segmentation
 │       │   ├── export_fcp7_xml.py                        # Stage 3A: FCP7 XML timeline export (Primary)
 │       │   ├── edl_to_video.py                           # Stage 3B: Single-pass hardware video rendering (Secondary)
-│       │   └── modules/                                  # Acoustic, video, validator, and GCP/Vertex AI modules
+│       │   └── modules/                                  # Acoustic, video, segmenter, validator, and GCP/Vertex AI modules
 │       └── assets/                                       # Canonical prompt templates (SSOT)
 │           └── edl_interview_template.md                 # Gemini multimodal interview rough-cut rules
 ├── AGENTS.md                                             # Workspace & engineering development rules (Part I & Part II)
 ├── setup.sh                                              # Native gcloud setup script (GCS, Lifecycle, IAM, .env)
 ├── .env.example                                          # Vertex AI (ADC) and GCS configuration template
-└── tests/                                                # Offline unit test suite (41 tests)
+└── tests/                                                # Offline unit test suite (46 tests)
 ```
 
 ---
@@ -90,14 +90,14 @@ flowchart TD
         S1_1["1.1 MFCC Acoustic Alignment & Subframe Refinement (<0.125 ms)"]:::stage1Style
         S1_2["1.2 EBU R128 Two-Pass Loudness Normalization (-14 LUFS)"]:::stage1Style
         S1_3["Deliverable / Master: Full Synced Camera Masters<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
-        S1_4["Artifact: Multi-in-One Full Grid Video<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_4["Artifact: Multi-in-One Full Grid Video<br/>(multicam_merged_full.mp4, 10 fps / 1s GOP)"]:::artifactStyle
         S1_1 --> S1_2
         S1_2 --> S1_3
         S1_3 --> S1_4
     end
 
-    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic Video Rough-Cut"]
-        S2_1["2.1 Zero-Split Agentic Video Inference<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+    subgraph S2["Stage 2: Gemini 3.8 Flash Multimodal Video Rough-Cut"]
+        S2_1["2.1 Silence-Aware Smart Segmentation (30-40 min) & Parallel Inference<br/>(MEDIA_RESOLUTION_LOW + Dynamic Thinking Budget)"]:::stage2Style
         S2_2["2.2 8-Check Deterministic EDL Semantic Validator<br/>(6 ERROR + 2 WARN Checks)"]:::stage2Style
         EDL["Artifact: Unified EDL & Audit Report<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
         S2_1 --> S2_2
@@ -173,19 +173,20 @@ flowchart TD
    - **Pass 1**: Measures Integrated Loudness (`I`), Loudness Range (`LRA = 11.0 LU`), and True Peak (`TP = -1.5 dBTP`).
    - **Pass 2**: Applies linear gain (`linear=true`) to lock integrated loudness at `-14.0 LUFS` without dynamic pumping or peak clipping.
 3. **Frame-Accurate Synchronized Masters (`CAM*_synced.mp4`)**:
-   - Re-encodes camera masters using hardware acceleration (`h264_videotoolbox` on Apple Silicon or `libx264 -crf 18`) to eliminate keyframe drift.
-4. **Zero-Split Full-Length Grid Composition (`multicam_merged_full.mp4`)**:
-   - Combines 2 to 6 synchronized cameras into one labeled canvas ($\le 1920 \times 1080$, each cell $\ge 640 \times 480$).
+   - Re-encodes camera masters at `20 Mbps` using hardware acceleration (`h264_videotoolbox` on Apple Silicon or `libx264 -crf 18`) to eliminate keyframe drift.
+4. **Full-Length Compact Grid Composition (`multicam_merged_full.mp4`)**:
+   - Combines 2 to 6 synchronized cameras into one labeled canvas ($\le 1920 \times 1080$, each cell $\ge 640 \times 480$) at `10 fps`, `1.2 Mbps`, and 1-second GOP (`-g 10`) for fast lossless slicing and cloud scanning.
 
 ---
 
-### Stage 2: Gemini 3.8 Flash Agentic Video Rough-Cut
+### Stage 2: Gemini 3.8 Flash Multimodal Video Rough-Cut
 
 1. **Pre-Roll and Countdown Removal**:
    - Removes clapperboards, mic checks, and on-set countdowns (`5, 4, 3, 2, 1`).
    - Verifies `[Global_Start_Time, Global_Start_Time + 2.0s]` to ensure zero countdown residue and trims post-interview chatter at `Global_End_Time`.
-2. **Zero-Split Agentic Video Inference**:
-   - Sends `multicam_merged_full.mp4` to **Vertex AI Gemini 3.8 Flash** (`processing="agentic"`), reducing input tokens by 99.7% without splitting long videos into chapters.
+2. **Standard Multimodal Inference & Silence-Aware Smart Segmentation (`30–40 min` Windows)**:
+   - Runs **Vertex AI Gemini 3.8 Flash** in Standard Multimodal mode (`--processing standard`, `MEDIA_RESOLUTION_LOW` + dynamic `thinking_budget` `1024–4096`) by default.
+   - For videos longer than 40 minutes (`2400s`), `generate_edl.py` detects natural speech pauses (`ffmpeg silencedetect` + RMS energy minimum fallback), slices lossless temporary chunks (`-c copy`) into `<output_dir>/_edl_chunks/`, runs parallel inference via `gs://<bucket>/raw/edl_chunks/`, stitches all shifted timestamps into `edl_full.csv`, and deletes all temporary local and GCS chunks in `finally` blocks.
 3. **8-Check Deterministic EDL Semantic Validation**:
    - Validates `E_NO_ROWS`, `E_PARSE_TIME`, `E_NEGATIVE_DURATION`, `E_NON_MONOTONIC`, `E_OVERLAP`, `E_EMPTY_CAMERA`, `W_UNKNOWN_CAMERA`, and `W_GAP`.
    - Writes `edl_full.csv` and `edl_full_report.md` to disk for review.
@@ -209,7 +210,7 @@ Renders `final_cut_full.mp4` directly from the synchronized camera masters in a 
 
 | GCS Prefix (`matchesPrefix`) | Stored Objects | Retention (`age`) | Cleanup Mechanism |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | Staged grid video (`multicam_merged_full.mp4`) | **2 Days (`age: 2`)** | Retains SHA-256 cached staging media for 2 days, then deletes automatically. |
+| **`raw/`** | Staged grid video (`multicam_merged_full.mp4`) & temp chunks (`raw/edl_chunks/*`) | **2 Days (`age: 2`)** | Deletes `raw/edl_chunks/*` immediately in `finally` blocks; retains full staging media for 2 days for SHA-256 cache reuse. |
 | **`output/`**, **`deliverables/`**, **`multicam_assets/`** | XML/CSV timelines, rendered videos, and reports | **15 Days (`age: 15`)** | Retains deliverables for 15 days for team review before automatic deletion. |
 
 ---

@@ -114,6 +114,99 @@ class TestGcpClient(unittest.TestCase):
         self.assertEqual(ref, "/tmp/gdrive_inputs/id_cam1.mp4")
         self.assertEqual(targets, ["/tmp/gdrive_inputs/id_cam2.mp4", "/tmp/gdrive_inputs/id_cam3.mp4"])
 
+    @patch("google.genai.Client")
+    @patch("modules.llm_client.resolve_gcp_config")
+    def test_get_vertex_client_sets_http_timeout(self, mock_cfg, mock_client_cls):
+        from modules.llm_client import get_vertex_client
+
+        mock_cfg.return_value = {
+            "project": "demo-proj",
+            "location": "global",
+            "region": "us-central1",
+            "bucket": "multicam-video-demo-proj",
+        }
+        get_vertex_client(project="demo-proj", location="global", timeout_ms=600_000)
+        self.assertTrue(mock_client_cls.called)
+        kwargs = mock_client_cls.call_args.kwargs
+        self.assertTrue(kwargs.get("vertexai"))
+        self.assertEqual(kwargs.get("project"), "demo-proj")
+        self.assertEqual(kwargs.get("location"), "global")
+        self.assertIsNotNone(kwargs.get("http_options"))
+        self.assertEqual(kwargs["http_options"].timeout, 600_000)
+
+    def test_extract_visible_text_ignores_thought_parts(self):
+        from types import SimpleNamespace
+        from generate_edl import _extract_visible_text
+
+        part_thought = SimpleNamespace(thought=True, text="internal reasoning")
+        part_visible = SimpleNamespace(thought=False, text="00:00.000,00:05.000,CAM1,Rule,Reason")
+        resp = SimpleNamespace(
+            candidates=[SimpleNamespace(content=SimpleNamespace(parts=[part_thought, part_visible]))],
+            text="fallback",
+        )
+        self.assertEqual(_extract_visible_text(resp), "00:00.000,00:05.000,CAM1,Rule,Reason")
+
+    def test_calculate_dynamic_thinking_budget(self):
+        from generate_edl import calculate_dynamic_thinking_budget
+
+        b_short = calculate_dynamic_thinking_budget(300.0)
+        b_chunk = calculate_dynamic_thinking_budget(1920.0)
+        self.assertGreaterEqual(b_short, 1024)
+        self.assertLessEqual(b_short, 4096)
+        self.assertGreaterEqual(b_chunk, 1024)
+        self.assertLessEqual(b_chunk, 4096)
+
+    @patch("modules.video_segmenter.detect_all_silences")
+    def test_find_natural_split_points_64min(self, mock_silences):
+        from modules.video_segmenter import find_natural_split_points
+
+        mock_silences.return_value = [
+            {"start": 1971.2, "end": 1972.6, "duration": 1.4, "mid": 1971.9},
+        ]
+        pts = find_natural_split_points(
+            "dummy.mp4",
+            start_sec=0.0,
+            end_sec=3867.4,
+            min_dur_sec=1800.0,
+            max_dur_sec=2400.0,
+        )
+        self.assertEqual(pts, [0.0, 1971.9, 3867.4])
+
+    def test_shift_and_merge_chunk_edl_rows(self):
+        from modules.video_segmenter import shift_and_merge_chunk_edl_rows
+
+        chunk_results = [
+            {
+                "part_index": 1,
+                "start_sec": 0.0,
+                "end_sec": 1971.9,
+                "csv_rows": [
+                    ["Start_Time", "End_Time", "Best_Camera", "剪輯規則", "剪輯原因"],
+                    ["00:38.500", "15:00.000", "CAM1", "Rule1", "Opening"],
+                    ["15:00.000", "32:51.500", "CAM2", "Rule2", "Guest"],
+                ],
+            },
+            {
+                "part_index": 2,
+                "start_sec": 1971.9,
+                "end_sec": 3867.4,
+                "csv_rows": [
+                    ["Start_Time", "End_Time", "Best_Camera", "剪輯規則", "剪輯原因"],
+                    ["00:00.000", "10:00.000", "CAM1", "Rule1", "Part2 start"],
+                    ["10:00.000", "20:17.600", "CAM2", "Rule2", "Closing"],
+                ],
+            },
+        ]
+        merged = shift_and_merge_chunk_edl_rows(chunk_results)
+        self.assertEqual(len(merged), 5)
+        # Boundary between Part 1 last cut and Part 2 first cut must be stitched at 32:51.900
+        self.assertEqual(merged[2][1], "32:51.900")
+        self.assertEqual(merged[3][0], "32:51.900")
+        self.assertEqual(merged[3][1], "42:51.900")
+        self.assertEqual(merged[4][0], "42:51.900")
+        self.assertEqual(merged[4][1], "53:09.500")
+
 
 if __name__ == "__main__":
     unittest.main()
+

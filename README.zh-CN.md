@@ -60,14 +60,14 @@ flowchart TD
         S1_1["1.1 MFCC 声学对齐与亚帧微调 (<0.125 ms)"]:::stage1Style
         S1_2["1.2 EBU R128 双阶段响度标准化 (-14 LUFS)"]:::stage1Style
         S1_3["交付成果 / 母带: 完整同步母带<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
-        S1_4["中间产物: 多机合一全长网格视频<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_4["中间产物: 多机合一全长网格视频<br/>(multicam_merged_full.mp4, 10 fps / 1s GOP)"]:::artifactStyle
         S1_1 --> S1_2
         S1_2 --> S1_3
         S1_3 --> S1_4
     end
 
-    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic 视频粗剪"]
-        S2_1["2.1 零切分 Agentic 视频推理<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+    subgraph S2["Stage 2: Gemini 3.8 Flash 多模态视频粗剪"]
+        S2_1["2.1 静音感知智能分段 (30-40 分钟) 与并行推理<br/>(MEDIA_RESOLUTION_LOW + 动态 Thinking Budget)"]:::stage2Style
         S2_2["2.2 8 项确定性 EDL 语义验证<br/>(6 项 ERROR + 2 项 WARN 检查)"]:::stage2Style
         EDL["中间产物: 统一剪辑决策表与验证报告<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
         S2_1 --> S2_2
@@ -126,8 +126,8 @@ flowchart TD
 
 ## 三阶段核心技术说明
 
-1. **Stage 1（多机位同步与预处理）**：执行 MFCC 声学时间对齐与亚帧微调（`<0.125 ms`）、EBU R128（`-14 LUFS`）双阶段线性响度标准化、逐帧精准同步母带导出（`CAM*_synced.mp4`）与零切分全长网格合成（`multicam_merged_full.mp4`）。
-2. **Stage 2（Gemini 3.8 Flash Agentic 粗剪决策）**：使用 **Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）对全长网格视频生成 `edl_full.csv`，自动剔除片头倒数与场记板，并执行 8 项确定性语义检查（`6 ERROR + 2 WARN`）。
+1. **Stage 1（多机位同步与预处理）**：执行 MFCC 声学时间对齐与亚帧微调（`<0.125 ms`）、EBU R128（`-14 LUFS`）双阶段线性响度标准化、逐帧精准同步母带导出（`CAM*_synced.mp4`，`20 Mbps`）与全长轻量网格合成（`multicam_merged_full.mp4`，`10 fps`、`1.2 Mbps`、1 秒短 GOP `-g 10`）。
+2. **Stage 2（Gemini 3.8 Flash 多模态粗剪与静音感知智能分段）**：默认采用 **Vertex AI Gemini 3.8 Flash** 标准多模态模式（`--processing standard`，`MEDIA_RESOLUTION_LOW` + 动态 `thinking_budget` `1024–4096`）。当视频超过 40 分钟时，自动在 30–40 分钟自然静音点无损切分至 `<output_dir>/_edl_chunks/` 并行推理，自动平移缝合为 `edl_full.csv` 并在 `finally` 块清理本地与云端临时分段，同时执行 8 项确定性语义检查（`6 ERROR + 2 WARN`）。
 3. **Stage 3A & 3B（导出 FCP7 XML 时间线 / 硬件加速视频渲染）**：支持 NTSC 分数帧率（`23.976`, `29.97`, `59.94`）与丢帧时间码（Drop-Frame）导出 `final_cut_full.xml`，或直接单次硬件渲染 `final_cut_full.mp4`。
 
 ---
@@ -136,7 +136,7 @@ flowchart TD
 
 | GCS 路径前缀 (`matchesPrefix`) | 存储对象 | 保留天数 (`age`) | 清理机制 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 暂存网格视频 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 缓存复用，期满自动删除。 |
+| **`raw/`** | 暂存网格视频 (`multicam_merged_full.mp4`) 与分段档 (`raw/edl_chunks/*`) | **2 天 (`age: 2`)** | `raw/edl_chunks/*` 在推理结束后立即由 `finally` 删除；全长文件保留 2 天供 SHA-256 缓存复用，期满自动删除。 |
 | **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 时间线、渲染视频与验证报告 | **15 天 (`age: 15`)** | 保留 15 天供团队审阅，期满自动清理。 |
 
 ---

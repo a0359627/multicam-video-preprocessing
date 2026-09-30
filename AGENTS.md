@@ -8,10 +8,10 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 
 1. **Strict Toolset Execution Only (No Ad-Hoc Scripts)**:
    - Execute all video preprocessing, EDL rough-cutting, XML exporting, and rendering exclusively via the official scripts in `skills/multicam-video-preprocessing/scripts/`. Writing temporary Python scripts or custom audio/video synchronization logic is **STRICTLY FORBIDDEN**.
-2. **Mandatory 3-Stage Gated Workflow (Zero-Split Agentic Architecture)**:
+2. **Mandatory 3-Stage Gated Workflow**:
    - Follow the 3-Stage Gated Runbook defined in [SKILL.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/SKILL.md):
-     - **Stage 1**: `skills/multicam-video-preprocessing/scripts/multicam_pipeline.py --normalize --merge` (MFCC `<0.125ms` sync + EBU R128 `-14 LUFS` + synced masters + `multicam_merged_full.mp4`).
-     - **Stage 2**: `skills/multicam-video-preprocessing/scripts/generate_edl.py` (Vertex AI Gemini 3.8 Flash Agentic Video `processing="agentic"` on full-length grid video + 8-check deterministic EDL semantic validation).
+     - **Stage 1**: `skills/multicam-video-preprocessing/scripts/multicam_pipeline.py --normalize --merge` (MFCC `<0.125ms` sync + EBU R128 `-14 LUFS` + synced masters + `multicam_merged_full.mp4` at `10 fps`, `1.2 Mbps`, `-g 10`).
+     - **Stage 2**: `skills/multicam-video-preprocessing/scripts/generate_edl.py` (Vertex AI Gemini 3.8 Flash Standard Multimodal `MEDIA_RESOLUTION_LOW` + dynamic `thinking_budget`, automatic silence-aware 30-40 min smart segmentation with `finally` cleanup + 8-check deterministic EDL semantic validation).
      - **Stage 3A (Primary 90%)**: `skills/multicam-video-preprocessing/scripts/export_fcp7_xml.py` (`final_cut_full.xml` for DaVinci Resolve / Premiere Pro / Final Cut Pro).
      - **Stage 3B (Secondary 10%)**: `skills/multicam-video-preprocessing/scripts/edl_to_video.py` (`final_cut_full.mp4` single-pass hardware render).
 3. **Fail-Fast & Exit Gate Verification**:
@@ -36,7 +36,7 @@ When modifying code, prompts, infrastructure scripts, or documentation in this r
 - **GCS Infrastructure & Two-Tier Lifecycle (`setup.sh`)**:
   - All cloud environment setup must be consolidated in [setup.sh](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/setup.sh) using 100% native `gcloud` CLI commands (`deploy.sh` is reserved for future Gemini Enterprise deployment).
   - Bucket Lifecycle auto-cleanup rules must maintain the two-tier retention policy:
-    - **`raw/` prefix**: **2 days (`age: 2`)** for ephemeral staging videos (with local SHA-256 hash caching).
+    - **`raw/` prefix**: **2 days (`age: 2`)** for ephemeral staging videos (with local SHA-256 hash caching). Temporary chunk slices under `<output_dir>/_edl_chunks/` and `gs://<bucket>/raw/edl_chunks/` are deleted immediately in `finally` blocks after Stage 2 completes.
     - **`output/`, `deliverables/`, `multicam_assets/` prefixes**: **15 days (`age: 15`)** for deliverables retention.
 
 ### 3. Deterministic Validation & Unit Testing Gate

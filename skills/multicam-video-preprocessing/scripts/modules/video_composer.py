@@ -104,12 +104,14 @@ def generate_grid_filter_complex(num_inputs, custom_cw=None, custom_ch=None, dra
 
 
 def compose_multicam_video(video_paths, output_path,
-                           video_bitrate="2000k", audio_bitrate="192k",
+                           video_bitrate="1200k", audio_bitrate="64k",
+                           fps=10, gop=10,
                            encoder="h264_videotoolbox",
                            draw_labels=True):
     """
-    Compose 2 to 6+ synchronized camera videos into a single multi-in-one grid video directly in Python.
-    Features automatic fallback for drawtext and hardware encoding.
+    Compose 2 to 6+ synchronized camera videos into a single multi-in-one grid video.
+    Uses short GOP (-g 10), 10 fps, 16 kHz mono audio, and +faststart MOOV index placement
+    for fast random seeking in Vertex AI Agentic Video Understanding.
     """
     if len(video_paths) == 0:
         return 0.0
@@ -128,9 +130,18 @@ def compose_multicam_video(video_paths, output_path,
             "-map", "0:a?",
             "-c:v", enc,
             "-b:v", video_bitrate,
+        ])
+        if fps:
+            c.extend(["-r", str(int(fps))])
+        if gop:
+            c.extend(["-g", str(int(gop))])
+        c.extend([
             "-pix_fmt", "yuv420p",
             "-c:a", "aac",
+            "-ac", "1",
+            "-ar", "16000",
             "-b:a", audio_bitrate,
+            "-movflags", "+faststart",
             "-shortest",
             output_path
         ])

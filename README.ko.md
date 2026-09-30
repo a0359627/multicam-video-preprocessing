@@ -60,14 +60,14 @@ flowchart TD
         S1_1["1.1 MFCC 음향 정렬 및 서브프레임 미세 조정 (<0.125 ms)"]:::stage1Style
         S1_2["1.2 EBU R128 2패스 선형 라우드니스 정규화 (-14 LUFS)"]:::stage1Style
         S1_3["산출물 / 마스터: 프레임 정확도 동기화 마스터<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
-        S1_4["중간 아티팩트: 멀티인원 전체 그리드 비디오<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_4["중간 아티팩트: 멀티인원 전체 그리드 비디오<br/>(multicam_merged_full.mp4, 10 fps / 1s GOP)"]:::artifactStyle
         S1_1 --> S1_2
         S1_2 --> S1_3
         S1_3 --> S1_4
     end
 
-    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic Video 러프컷"]
-        S2_1["2.1 무분할 Agentic Video 추론<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+    subgraph S2["Stage 2: Gemini 3.8 Flash 멀티모달 비디오 러프컷"]
+        S2_1["2.1 무음 감지 스마트 분할 (30-40분) 및 병렬 추론<br/>(MEDIA_RESOLUTION_LOW + 동적 Thinking Budget)"]:::stage2Style
         S2_2["2.2 8개 항목 결정론적 EDL 검증<br/>(6 ERROR + 2 WARN 검사)"]:::stage2Style
         EDL["중간 아티팩트: 통합 EDL 및 검증 리포트<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
         S2_1 --> S2_2
@@ -126,8 +126,8 @@ flowchart TD
 
 ## 3단계 핵심 기술 개요
 
-1. **Stage 1 (멀티카메라 동기화 및 전처리)**: MFCC 음향 정렬 및 서브프레임 미세 조정(`<0.125 ms`), EBU R128(`-14 LUFS`) 2패스 선형 라우드니스 정규화, 프레임 정확도 동기화 마스터 출력(`CAM*_synced.mp4`), 무분할 전체 그리드 합성(`multicam_merged_full.mp4`)을 수행합니다.
-2. **Stage 2 (Gemini 3.8 Flash Agentic Video 러프컷)**: **Vertex AI Gemini 3.8 Flash**(`processing="agentic"`)로 카운트다운 및 슬레이트를 제거하여 `edl_full.csv`를 생성하고 8개 항목의 결정론적 EDL 검증(`6 ERROR + 2 WARN`)을 수행합니다.
+1. **Stage 1 (멀티카메라 동기화 및 전처리)**: MFCC 음향 정렬 및 서브프레임 미세 조정(`<0.125 ms`), EBU R128(`-14 LUFS`) 2패스 선형 라우드니스 정규화, 프레임 정확도 동기화 마스터 출력(`CAM*_synced.mp4`, `20 Mbps`), 경량 전체 그리드 합성(`multicam_merged_full.mp4`, `10 fps`, `1.2 Mbps`, 1초 GOP `-g 10`)을 수행합니다.
+2. **Stage 2 (Gemini 3.8 Flash 멀티모달 러프컷 및 무음 감지 스마트 분할)**: 기본으로 **Vertex AI Gemini 3.8 Flash** 표준 멀티모달 모드(`--processing standard`, `MEDIA_RESOLUTION_LOW` + 동적 `thinking_budget` `1024–4096`)를 사용합니다. 40분을 초과하는 영상은 30~40분 자연 무음 구간에서 `<output_dir>/_edl_chunks/`로 무손실 분할하여 병렬 추론하고 `edl_full.csv`로 병합한 뒤, `finally` 블록에서 로컬 및 GCS 임시 청크를 자동 삭제하며 8개 항목의 결정론적 EDL 검증(`6 ERROR + 2 WARN`)을 수행합니다.
 3. **Stage 3A & 3B (FCP7 XML 타임라인 내보내기 / 단일 패스 비디오 렌더링)**: NTSC 소수점 프레임 레이트(`23.976`, `29.97`, `59.94`) 및 드롭 프레임(Drop-Frame)을 지원하는 `final_cut_full.xml`을 내보내거나 `final_cut_full.mp4`를 직접 렌더링합니다.
 
 ---
@@ -136,7 +136,7 @@ flowchart TD
 
 | GCS 경로 접두사 (`matchesPrefix`) | 저장 객체 | 보관 기간 (`age`) | 정리 방식 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 스테이징된 그리드 비디오 (`multicam_merged_full.mp4`) | **2일 (`age: 2`)** | SHA-256 캐시 재사용을 위해 2일간 보관 후 자동 삭제합니다. |
+| **`raw/`** | 스테이징된 그리드 비디오 (`multicam_merged_full.mp4`) 및 임시 청크 (`raw/edl_chunks/*`) | **2일 (`age: 2`)** | `raw/edl_chunks/*`는 추론 직후 `finally` 블록에서 즉시 삭제되며, 전체 그리드 비디오는 SHA-256 캐시 재사용을 위해 2일간 보관 후 자동 삭제합니다. |
 | **`output/`**, **`deliverables/`**, **`multicam_assets/`** | XML/CSV 타임라인, 렌더링 비디오 및 검증 리포트 | **15일 (`age: 15`)** | 팀 검토를 위해 15일간 보관한 후 자동 삭제합니다. |
 
 ---

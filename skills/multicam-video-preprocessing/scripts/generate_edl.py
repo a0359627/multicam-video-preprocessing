@@ -1,24 +1,29 @@
 #!/usr/bin/env python3
 """
 AI Multimodal Video to EDL Decision Generator (generate_edl.py).
-Powered by Google Cloud Vertex AI (ADC) & Gemini 3.8 Flash Agentic Video Understanding
-for zero-split full-length multicam video editing (>1 hour in a single pass).
+Powered by Google Cloud Vertex AI (ADC) & Gemini 3.8 Flash Multimodal Video Understanding.
 
 Features:
   - 100% Vertex AI (ADC) & GCS Architecture: Uses Application Default Credentials
     and Google Cloud Storage (`gs://<bucket>/raw/`) with SHA-256 hash caching and
     2-day GCS Bucket Lifecycle auto-cleanup (plus optional `--cleanup-gcs`).
-  - Agentic Video Understanding (Default): Uses goal-directed sparse temporal sampling,
-    reducing token usage by 99.7% (~3k tokens for 1hr video) and eliminating split boundaries.
-  - Broadcast-Grade EDL Prompt: Loads assets/edl_interview_template.md with zero-tolerance
-    pre-roll / countdown elimination and asymmetric safety margin.
+  - Silence-Aware Smart Segmentation (30-40 min windows): Automatically detects natural
+    speech pauses via FFmpeg silencedetect + RMS energy minimum for videos exceeding
+    40 minutes, slices temporary chunks in `<output_dir>/_edl_chunks/`, runs parallel
+    inference, shifts and stitches timestamps into a single `edl_full.csv`, and deletes
+    all temporary local and GCS chunks in a `finally` block.
+  - Standard Low-Res Multimodal Mode (Default): Uses `MEDIA_RESOLUTION_LOW` and dynamic
+    `thinking_budget` for fast, timeout-free inference.
   - Deterministic EDL Semantic Validation: Built-in 8-rule structural validation (`--strict-edl`).
 """
 
 import argparse
+import concurrent.futures
 import csv
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 
@@ -40,6 +45,12 @@ try:
         format_validation_report,
         get_report_section_heading,
     )
+    from modules.video_segmenter import (
+        find_natural_split_points,
+        slice_video_into_temp_chunks,
+        shift_and_merge_chunk_edl_rows,
+        format_edl_timestamp,
+    )
 except ImportError:
     from scripts.modules.llm_client import get_vertex_client
     from scripts.modules.gcp_client import (
@@ -55,6 +66,12 @@ except ImportError:
         validate_edl_rows,
         format_validation_report,
         get_report_section_heading,
+    )
+    from scripts.modules.video_segmenter import (
+        find_natural_split_points,
+        slice_video_into_temp_chunks,
+        shift_and_merge_chunk_edl_rows,
+        format_edl_timestamp,
     )
 
 
@@ -82,17 +99,182 @@ def load_prompt_template(custom_path=None):
     raise FileNotFoundError(f"Could not locate EDL prompt template. Searched: {paths_to_try}")
 
 
-def call_agentic_video_edl(gcs_uri, prompt_text, client, model="gemini-3.8-flash"):
+def _probe_video_duration_sec(video_path: str) -> float:
+    """Probe duration of a local video file in seconds using ffprobe."""
+    if not video_path or not os.path.isfile(video_path):
+        return 0.0
+    try:
+        cmd = [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "default=noprint_wrappers=1:nokey=1",
+            video_path,
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        if res.returncode == 0 and res.stdout.strip():
+            return float(res.stdout.strip())
+    except Exception:
+        pass
+    return 0.0
+
+
+def calculate_dynamic_thinking_budget(video_duration_seconds: float) -> int:
     """
-    Call Vertex AI Gemini using Agentic Video Understanding (processing="agentic").
-    Uses google.genai client.interactions.create with fallback to client.models.generate_content.
+    Calculate the optimal thinking budget for Gemini Flash based on video duration.
+    Balance multi-camera cut reasoning with the 300-second gateway deadline.
+    """
+    est_cuts = max(10.0, float(video_duration_seconds) / 25.0)
+    cognitive_demand = 1024 + int(est_cuts * 45.0)
+    est_prefill_sec = min(145.0, 15.0 + max(0.0, float(video_duration_seconds)) * 0.055)
+    est_output_sec = 25.0
+    available_thinking_sec = max(25.0, 220.0 - est_prefill_sec - est_output_sec)
+    safe_max_tokens = int(available_thinking_sec * 42.0)
+    target_budget = min(cognitive_demand, safe_max_tokens)
+    return max(1024, min(target_budget, 4096))
+
+
+def _build_chunk_prompt(base_prompt: str, part_index: int, total_parts: int, start_sec: float, end_sec: float) -> str:
+    """
+    Append segment-specific boundary instructions to the base EDL prompt.
+    """
+    dur_sec = max(0.0, end_sec - start_sec)
+    dur_str = format_edl_timestamp(dur_sec)
+    global_start_str = format_edl_timestamp(start_sec)
+    global_end_str = format_edl_timestamp(end_sec)
+
+    if total_parts <= 1:
+        return (
+            base_prompt
+            + "\n\n---\n"
+            + "### 額外時間碼與全片長度特別指示：\n"
+            + f"1. 本影片總長為 `{dur_str}`，時間碼格式請支援 `HH:MM:SS.000` 或 `MM:SS.000`。\n"
+            + "2. 請由開頭 Global_Start_Time 一路分析覆蓋至全片結束 Global_End_Time。\n"
+        )
+
+    if part_index == 1:
+        role_note = (
+            f"1. 本段為全片第 {part_index}/{total_parts} 段（對應母片區間 `{global_start_str}` 至 `{global_end_str}`，本段片長 `{dur_str}`）。\n"
+            "2. **時間碼基準**：請以本段影片自身的相對時間碼（由 `00:00.000` 起算至 `" + dur_str + "`）輸出 CSV。\n"
+            "3. **片頭與結尾規則**：請在開頭套用【規則 0】裁除開拍前倒數與準備廢料；但本段結尾是訪談中段的自然換氣切點（並非節目收工），**請務必一路剪輯覆蓋至本段結尾 `" + dur_str + "`，切勿提早截斷結尾**。\n"
+        )
+    elif part_index == total_parts:
+        role_note = (
+            f"1. 本段為全片第 {part_index}/{total_parts} 段（最後一段，對應母片區間 `{global_start_str}` 至 `{global_end_str}`，本段片長 `{dur_str}`）。\n"
+            "2. **時間碼基準**：請以本段影片自身的相對時間碼（由 `00:00.000` 起算至 `" + dur_str + "`）輸出 CSV。\n"
+            "3. **片頭與結尾規則**：本段開頭緊接上一段訪談，**第一筆鏡頭請直接從 `00:00.000` 開始（切勿當成片頭廢料裁除）**；並在節目結尾道別後套用【規則 0】裁除收工關機前廢料。\n"
+        )
+    else:
+        role_note = (
+            f"1. 本段為全片第 {part_index}/{total_parts} 段（中段，對應母片區間 `{global_start_str}` 至 `{global_end_str}`，本段片長 `{dur_str}`）。\n"
+            "2. **時間碼基準**：請以本段影片自身的相對時間碼（由 `00:00.000` 起算至 `" + dur_str + "`）輸出 CSV。\n"
+            "3. **片頭與結尾規則**：本段為訪談進行中段落，**請直接從 `00:00.000` 一路連續剪輯覆蓋至本段結尾 `" + dur_str + "`**，頭尾皆不裁除。\n"
+        )
+
+    return base_prompt + "\n\n---\n### 分段時間碼與邊界銜接特別指示：\n" + role_note
+
+
+def _extract_visible_text(response):
+    """
+    Extract non-thought text parts from a generate_content response.
+    """
+    if not response:
+        return ""
+    candidates = getattr(response, "candidates", None)
+    if candidates and len(candidates) > 0:
+        content = getattr(candidates[0], "content", None)
+        parts = getattr(content, "parts", None) if content else None
+        if parts:
+            visible = [
+                getattr(p, "text", "")
+                for p in parts
+                if isinstance(getattr(p, "text", None), str)
+                and getattr(p, "text", "")
+                and getattr(p, "thought", False) is not True
+            ]
+            if visible:
+                return "\n".join(visible).strip()
+    try:
+        if getattr(response, "text", None):
+            return response.text.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def ensure_agentic_ready_video(video_path, max_size_mb=900.0, encoder="h264_videotoolbox"):
+    """
+    Verify that a local composite grid video is compact and indexed with short GOP for GCS random seeking.
+    If the file size exceeds max_size_mb, transcode a lightweight short-GOP (+faststart, 10 fps, -g 10, 1200k)
+    proxy file in the same directory and return its path.
+    """
+    if not video_path or not os.path.isfile(video_path):
+        return video_path
+
+    size_mb = os.path.getsize(video_path) / (1024 * 1024)
+    if size_mb <= max_size_mb:
+        return video_path
+
+    base, _ = os.path.splitext(video_path)
+    proxy_path = f"{base}_agentic_opt.mp4"
+    if os.path.isfile(proxy_path):
+        proxy_mb = os.path.getsize(proxy_path) / (1024 * 1024)
+        if 0 < proxy_mb <= max_size_mb:
+            print(f"  • Using cached lightweight video proxy: {proxy_path} ({proxy_mb:.1f} MB)")
+            return proxy_path
+
+    print(
+        f"  • Input video is {size_mb:.1f} MB (> {max_size_mb:.0f} MB). "
+        f"Transcoding short-GOP faststart proxy (10 fps, -g 10, 1200k)..."
+    )
+    t0 = time.time()
+    for enc in ([encoder, "libx264"] if encoder != "libx264" else ["libx264"]):
+        cmd = [
+            "ffmpeg", "-y",
+            "-i", video_path,
+            "-c:v", enc,
+            "-b:v", "1200k",
+            "-r", "10",
+            "-g", "10",
+            "-pix_fmt", "yuv420p",
+            "-c:a", "aac",
+            "-ac", "1",
+            "-ar", "16000",
+            "-b:a", "64k",
+            "-movflags", "+faststart",
+            proxy_path,
+        ]
+        res = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        if res.returncode == 0 and os.path.isfile(proxy_path):
+            new_mb = os.path.getsize(proxy_path) / (1024 * 1024)
+            print(
+                f"  ✓ Short-GOP proxy ready in {time.time() - t0:.1f}s: "
+                f"{proxy_path} ({size_mb:.1f} MB -> {new_mb:.1f} MB)"
+            )
+            return proxy_path
+
+    return video_path
+
+
+def call_agentic_video_edl(
+    gcs_uri,
+    prompt_text,
+    client,
+    model="gemini-3.8-flash",
+    max_output_tokens=65536,
+    thinking_budget=4096,
+    timeout_sec=600.0,
+):
+    """
+    Call Vertex AI Gemini with Agentic Video Understanding (processing="agentic").
+    Uses client.interactions.create with explicit timeout and max_output_tokens,
+    with fallback to client.models.generate_content (MediaProcessing.AGENTIC).
     """
     from google.genai import types
 
     mime_type = guess_mime_type(gcs_uri)
     print(f"\n[Step 2/3] 🤖 Calling Vertex AI Agentic Video Understanding ({model}) ...")
     print(f"  • Video GCS URI : {gcs_uri}")
-    print(f"  • Processing    : agentic (dynamic sparse sampling & sub-second retrieval)")
+    print(f"  • Processing    : agentic (dynamic sparse sampling & sub-second retrieval, timeout={int(timeout_sec)}s)")
     t0 = time.time()
 
     raw_output = ""
@@ -100,7 +282,6 @@ def call_agentic_video_edl(gcs_uri, prompt_text, client, model="gemini-3.8-flash
 
     with LiveTicker(f"Vertex AI Agentic Gemini ({model}) actively scanning video & computing EDL cuts"):
         try:
-            # Primary: client.interactions.create
             interaction = client.interactions.create(
                 model=model,
                 input=[
@@ -115,40 +296,52 @@ def call_agentic_video_edl(gcs_uri, prompt_text, client, model="gemini-3.8-flash
                         "text": prompt_text,
                     },
                 ],
+                generation_config={
+                    "max_output_tokens": max_output_tokens,
+                },
+                timeout=float(timeout_sec),
             )
             raw_output = interaction.output_text or ""
             if hasattr(interaction, "usage") and interaction.usage:
                 usage_info = {
-                    "total_input_tokens": getattr(interaction.usage, "total_input_tokens", 0),
-                    "total_output_tokens": getattr(interaction.usage, "total_output_tokens", 0),
-                    "total_thought_tokens": getattr(interaction.usage, "total_thought_tokens", 0),
-                    "total_tokens": getattr(interaction.usage, "total_tokens", 0),
+                    "total_input_tokens": getattr(interaction.usage, "total_input_tokens", 0) or 0,
+                    "total_output_tokens": getattr(interaction.usage, "total_output_tokens", 0) or 0,
+                    "total_thought_tokens": getattr(interaction.usage, "total_thought_tokens", 0) or 0,
+                    "total_tool_use_tokens": getattr(interaction.usage, "total_tool_use_tokens", 0) or 0,
+                    "total_tokens": getattr(interaction.usage, "total_tokens", 0) or 0,
                 }
         except Exception as e:
             print(
-                f"\n  ⚠️ interactions.create encountered: {e}. Trying client.models.generate_content with MediaProcessing.AGENTIC..."
+                f"\n  ⚠️ interactions.create encountered: {e}. "
+                f"Trying client.models.generate_content with MediaProcessing.AGENTIC..."
             )
             try:
-                # Fallback: client.models.generate_content with MediaProcessing.AGENTIC
                 part = types.Part(
                     file_data=types.FileData(file_uri=gcs_uri, mime_type=mime_type),
                     media_processing=types.MediaProcessing.AGENTIC,
                 )
+                cfg_kwargs = {
+                    "temperature": 0.2,
+                    "max_output_tokens": max_output_tokens,
+                }
+                if thinking_budget is not None and hasattr(types, "ThinkingConfig"):
+                    cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+                if hasattr(types, "AutomaticFunctionCallingConfig"):
+                    cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+
                 response = client.models.generate_content(
                     model=model,
                     contents=[part, prompt_text],
-                    config=types.GenerateContentConfig(
-                        temperature=0.2,
-                        max_output_tokens=8192,
-                    ),
+                    config=types.GenerateContentConfig(**cfg_kwargs),
                 )
-                raw_output = response.text or ""
+                raw_output = _extract_visible_text(response)
                 if hasattr(response, "usage_metadata") and response.usage_metadata:
                     usage_info = {
-                        "total_input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-                        "total_output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
-                        "total_thought_tokens": getattr(response.usage_metadata, "thoughts_token_count", 0),
-                        "total_tokens": getattr(response.usage_metadata, "total_token_count", 0),
+                        "total_input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0) or 0,
+                        "total_output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0) or 0,
+                        "total_thought_tokens": getattr(response.usage_metadata, "thoughts_token_count", 0) or 0,
+                        "total_tool_use_tokens": getattr(response.usage_metadata, "tool_use_prompt_token_count", 0) or 0,
+                        "total_tokens": getattr(response.usage_metadata, "total_token_count", 0) or 0,
                     }
             except Exception as e2:
                 raise RuntimeError(
@@ -157,44 +350,77 @@ def call_agentic_video_edl(gcs_uri, prompt_text, client, model="gemini-3.8-flash
 
     duration = time.time() - t0
     print(f"  ✓ Agentic Video inference completed in {duration:.1f}s")
-    if usage_info:
-        print("  📊 Token Usage:")
-        print(f"     - Input Tokens  : {usage_info.get('total_input_tokens', 0):,}")
-        print(f"     - Output Tokens : {usage_info.get('total_output_tokens', 0):,}")
-        if usage_info.get("total_thought_tokens"):
-            print(f"     - Thought Tokens: {usage_info.get('total_thought_tokens', 0):,}")
-        print(f"     - Total Tokens  : {usage_info.get('total_tokens', 0):,}")
-
     return raw_output, usage_info, duration
 
 
-def generate_edl_content_standard(gcs_uri, prompt_text, client, model="gemini-3.8-flash"):
-    """Standard Vertex AI multimodal generateContent call (1fps video sampling fallback)."""
-    print(f"\n[Step 2/3] 🤖 Calling Vertex AI Gemini model: {model} (Standard Mode) ...")
+def generate_edl_content_standard(
+    gcs_uri,
+    prompt_text,
+    client,
+    model="gemini-3.8-flash",
+    max_output_tokens=65536,
+    thinking_budget=None,
+    video_duration_sec=1800.0,
+    label_prefix="",
+    use_ticker=True,
+):
+    """
+    Standard Vertex AI multimodal generateContent call with MEDIA_RESOLUTION_LOW
+    and dynamic thinking budget.
+    """
     from google.genai import types
+
+    resolved_budget = (
+        int(thinking_budget)
+        if thinking_budget is not None
+        else calculate_dynamic_thinking_budget(video_duration_sec)
+    )
+    tag = f"[{label_prefix}] " if label_prefix else ""
+    print(
+        f"  ► {tag}Calling Vertex AI Gemini ({model}, Standard Low-Res, "
+        f"thinking_budget={resolved_budget} tokens) -> {gcs_uri}"
+    )
 
     mime_type = guess_mime_type(gcs_uri)
     t0 = time.time()
-    with LiveTicker(f"Vertex AI Gemini ({model}) analyzing video & computing EDL cuts"):
-        part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
+    cfg_kwargs = {
+        "temperature": 0.1,
+        "max_output_tokens": max_output_tokens,
+    }
+    if hasattr(types, "MediaResolution"):
+        cfg_kwargs["media_resolution"] = types.MediaResolution.MEDIA_RESOLUTION_LOW
+    if hasattr(types, "ThinkingConfig"):
+        cfg_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=resolved_budget)
+    if hasattr(types, "AutomaticFunctionCallingConfig"):
+        cfg_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+
+    part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
+    if use_ticker:
+        with LiveTicker(f"{tag}Vertex AI Gemini ({model}) analyzing video & computing EDL cuts"):
+            response = client.models.generate_content(
+                model=model,
+                contents=[part, prompt_text],
+                config=types.GenerateContentConfig(**cfg_kwargs),
+            )
+    else:
         response = client.models.generate_content(
             model=model,
             contents=[part, prompt_text],
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=8192,
-            ),
+            config=types.GenerateContentConfig(**cfg_kwargs),
         )
-    raw_output = response.text or ""
+
+    raw_output = _extract_visible_text(response)
     usage_info = {}
     if hasattr(response, "usage_metadata") and response.usage_metadata:
         usage_info = {
-            "total_input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0),
-            "total_output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0),
-            "total_thought_tokens": getattr(response.usage_metadata, "thoughts_token_count", 0),
-            "total_tokens": getattr(response.usage_metadata, "total_token_count", 0),
+            "total_input_tokens": getattr(response.usage_metadata, "prompt_token_count", 0) or 0,
+            "total_output_tokens": getattr(response.usage_metadata, "candidates_token_count", 0) or 0,
+            "total_thought_tokens": getattr(response.usage_metadata, "thoughts_token_count", 0) or 0,
+            "total_tool_use_tokens": getattr(response.usage_metadata, "tool_use_prompt_token_count", 0) or 0,
+            "total_tokens": getattr(response.usage_metadata, "total_token_count", 0) or 0,
         }
     duration = time.time() - t0
+    print(f"    ✓ {tag}Completed in {duration:.1f}s (Tokens: {usage_info.get('total_tokens', 0):,})")
     return raw_output, usage_info, duration
 
 
@@ -209,7 +435,6 @@ def parse_edl_csv_and_report(raw_text):
     csv_content = csv_match.group(1).strip() if csv_match else ""
 
     if not csv_content:
-        # Fallback: search for header Start_Time,End_Time
         lines = raw_text.splitlines()
         capturing = False
         captured_lines = []
@@ -242,7 +467,7 @@ def parse_edl_csv_and_report(raw_text):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="AI Multimodal Video to EDL Decision Generator (Vertex AI ADC + GCS + Gemini 3.8 Flash Agentic Video).",
+        description="AI Multimodal Video to EDL Decision Generator (Vertex AI ADC + GCS + Silence-Aware Segmentation).",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
 
@@ -258,8 +483,18 @@ def main():
                         help="Custom prompt template file path (defaults to assets/edl_interview_template.md)")
     parser.add_argument("--model", default="gemini-3.8-flash",
                         help="Vertex AI Gemini model name (default: gemini-3.8-flash)")
-    parser.add_argument("--processing", choices=["agentic", "standard"], default="agentic",
-                        help="Video processing mode: 'agentic' (default, 99.7%% token savings, >1hr zero-split) or 'standard'")
+    parser.add_argument("--processing", choices=["standard", "agentic"], default="standard",
+                        help="Video processing mode: 'standard' (default, Non-Agentic Low-Res + silence-aware segmentation) or 'agentic'")
+    parser.add_argument("--chunk-min-dur", type=float, default=1800.0,
+                        help="Minimum chapter segment duration in seconds for silence-aware splitting (default: 1800 = 30 mins)")
+    parser.add_argument("--chunk-max-dur", type=float, default=2400.0,
+                        help="Maximum chapter segment duration in seconds before splitting at silence points (default: 2400 = 40 mins)")
+    parser.add_argument("--timeout", type=int, default=600,
+                        help="HTTP timeout in seconds for Vertex AI video inference (default: 600)")
+    parser.add_argument("--max-output-tokens", type=int, default=65536,
+                        help="Maximum output tokens for EDL generation (default: 65536)")
+    parser.add_argument("--thinking-budget", type=int, default=None,
+                        help="Thinking token budget for generate_content mode (default: auto-calculated by video duration)")
     parser.add_argument("--project", default=None,
                         help="Google Cloud Project ID for Vertex AI / GCS (or set GOOGLE_CLOUD_PROJECT in .env)")
     parser.add_argument("--gcs-bucket", "--bucket", dest="gcs_bucket", default=None,
@@ -273,13 +508,13 @@ def main():
     parser.add_argument("--cleanup-gcs", action="store_true",
                         help="Immediately delete the staged video from GCS after EDL generation completes (otherwise governed by 2-day GCS Lifecycle)")
     parser.add_argument("--strict-edl", action="store_true",
-                        help="EDL 驗證出現 ERROR 時中斷執行（預設僅警告並繼續）")
+                        help="Halt execution with exit code 1 when EDL validation finds ERROR issues")
     parser.add_argument("--lang", default="en",
                         help="Language for the EDL validation report (default: en)")
     parser.add_argument("--edl-max-gap-sec", type=float, default=0.05,
-                        help="EDL 鏡頭間隔容許門檻秒數 (預設: 0.05)")
+                        help="Maximum allowed gap in seconds between consecutive EDL cuts (default: 0.05)")
     parser.add_argument("--edl-known-cameras", default=None,
-                        help=r"EDL 預期已知相機列表，逗號分隔如 CAM1,CAM2 (預設: 自動推斷 ^CAM\d+$)")
+                        help=r"Comma-separated list of expected camera names, e.g. CAM1,CAM2 (default: ^CAM\d+$)")
 
     args = parser.parse_args()
 
@@ -313,17 +548,26 @@ def main():
     print(f"🎬  Multimodal AI Video to EDL Generator (Model: {args.model} | Mode: {args.processing.upper()})")
     print("=" * 78)
     print(f"  • Input Video    : {args.video}")
-    print(f"  • Architecture   : {'Zero-Split Agentic Video (99.7% Token Reduction)' if args.processing == 'agentic' else 'Standard 1fps Multimodal'}")
+    print(f"  • Architecture   : {'Standard Low-Res Multimodal + Silence-Aware Segmentation (30-40 min)' if args.processing == 'standard' else 'Agentic Video Understanding'}")
     print(f"  • Active Backend : Google Cloud Vertex AI (Project: {gcp_cfg['project']}, Location: {gcp_cfg['location']})")
     print(f"  • GCS Storage    : gs://{gcp_cfg['bucket']}/raw/ (Region: {gcp_cfg['region']}, 2-day Lifecycle)")
     print(f"  • Target CSV     : {edl_csv_path}")
     print(f"  • Target Report  : {report_path}")
     print("-" * 78)
 
+    base_prompt_text = load_prompt_template(args.template)
+    genai_client = get_vertex_client(
+        project=gcp_cfg["project"],
+        location=gcp_cfg["location"],
+        timeout_ms=int(args.timeout * 1000),
+    )
+
+    local_video_path = None
+    video_uri = None
     if is_gcs_uri:
         video_uri = args.video
     elif is_gdrive:
-        video_uri, _ = transfer_gdrive_to_gcs_with_cache(
+        video_uri, local_video_path = transfer_gdrive_to_gcs_with_cache(
             args.video,
             bucket_name=gcp_cfg["bucket"],
             gcs_prefix="raw",
@@ -333,52 +577,179 @@ def main():
             force=args.force_upload,
         )
     else:
-        video_uri = upload_file_to_gcs_with_cache(
-            args.video,
-            bucket_name=gcp_cfg["bucket"],
-            gcs_prefix="raw",
-            project=gcp_cfg["project"],
-            region=gcp_cfg["region"],
-            force_upload=args.force_upload,
-        )
-    genai_client = get_vertex_client(
-        project=gcp_cfg["project"],
-        location=gcp_cfg["location"],
+        local_video_path = ensure_agentic_ready_video(args.video)
+
+    total_video_dur = _probe_video_duration_sec(local_video_path) if local_video_path else 1800.0
+    use_silence_segmentation = (
+        local_video_path is not None
+        and os.path.isfile(local_video_path)
+        and args.processing == "standard"
+        and total_video_dur > args.chunk_max_dur
     )
 
-    prompt_text = load_prompt_template(args.template)
-
-    # Full-length video instruction: ensure model knows timecode format covers >1hr without slicing
-    prompt_text += (
-        "\n\n---\n"
-        "### 額外時間碼與全片長度特別指示：\n"
-        "1. 本影片為完整全集錄影，時間碼格式請支援 `HH:MM:SS.000` 或 `MM:SS.000`（如 `01:02:15.000` 或 `62:15.000` 皆可）。\n"
-        "2. 請由開頭 Global_Start_Time 一路分析覆蓋至全片結束 Global_End_Time，全片無切分斷句。\n"
-    )
+    chunks_dir = os.path.join(out_dir, "_edl_chunks")
+    temp_gcs_uris = []
 
     try:
-        if args.processing == "agentic":
-            try:
-                response_text, usage_info, duration = call_agentic_video_edl(
-                    video_uri, prompt_text, client=genai_client, model=args.model
-                )
-            except Exception as e:
+        if use_silence_segmentation:
+            print(
+                f"\n[Step 1/3] 🔇 Video duration is {format_edl_timestamp(total_video_dur)} "
+                f"(> {args.chunk_max_dur / 60.0:.0f} mins). Scanning for natural silence split points..."
+            )
+            split_points = find_natural_split_points(
+                local_video_path,
+                start_sec=0.0,
+                end_sec=total_video_dur,
+                min_dur_sec=args.chunk_min_dur,
+                max_dur_sec=args.chunk_max_dur,
+            )
+            if os.path.exists(chunks_dir):
+                shutil.rmtree(chunks_dir, ignore_errors=True)
+
+            chunks = slice_video_into_temp_chunks(local_video_path, split_points, chunks_dir)
+            print(f"  ✓ Sliced {len(chunks)} segments at natural silence points into {chunks_dir}:")
+            for c in chunks:
                 print(
-                    f"\n[Warning] Agentic processing encountered ({e}). Falling back to Vertex AI standard generateContent...",
-                    file=sys.stderr,
+                    f"    • Part {c['part_index']}/{c['total_parts']}: "
+                    f"{format_edl_timestamp(c['start_sec'])} -> {format_edl_timestamp(c['end_sec'])} "
+                    f"({c['duration_sec'] / 60.0:.1f} mins)"
                 )
-                response_text, usage_info, duration = generate_edl_content_standard(
-                    video_uri, prompt_text, client=genai_client, model=args.model
+
+            print(f"\n[Step 2/3] 🚀 Uploading & running parallel Non-Agentic inference ({len(chunks)} parts)...")
+            t_all_start = time.time()
+
+            def _process_single_chunk(chunk_info):
+                p_idx = chunk_info["part_index"]
+                p_tot = chunk_info["total_parts"]
+                c_path = chunk_info["path"]
+                c_uri = upload_file_to_gcs_with_cache(
+                    c_path,
+                    bucket_name=gcp_cfg["bucket"],
+                    gcs_prefix="raw/edl_chunks",
+                    project=gcp_cfg["project"],
+                    region=gcp_cfg["region"],
+                    force_upload=True,
                 )
+                temp_gcs_uris.append(c_uri)
+
+                c_prompt = _build_chunk_prompt(
+                    base_prompt_text,
+                    part_index=p_idx,
+                    total_parts=p_tot,
+                    start_sec=chunk_info["start_sec"],
+                    end_sec=chunk_info["end_sec"],
+                )
+                c_client = get_vertex_client(
+                    project=gcp_cfg["project"],
+                    location=gcp_cfg["location"],
+                    timeout_ms=int(args.timeout * 1000),
+                )
+                c_text, c_usage, c_dur = generate_edl_content_standard(
+                    c_uri,
+                    c_prompt,
+                    client=c_client,
+                    model=args.model,
+                    max_output_tokens=args.max_output_tokens,
+                    thinking_budget=args.thinking_budget,
+                    video_duration_sec=chunk_info["duration_sec"],
+                    label_prefix=f"Part {p_idx}/{p_tot}",
+                    use_ticker=False,
+                )
+                c_rows, c_report = parse_edl_csv_and_report(c_text)
+                return {
+                    "part_index": p_idx,
+                    "start_sec": chunk_info["start_sec"],
+                    "end_sec": chunk_info["end_sec"],
+                    "csv_rows": c_rows,
+                    "report_md": c_report,
+                    "usage": c_usage,
+                    "duration": c_dur,
+                }
+
+            chunk_results = []
+            with LiveTicker(f"Vertex AI Gemini ({args.model}) analyzing {len(chunks)} silence-aligned parts in parallel"):
+                with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(chunks), 3)) as executor:
+                    futures = [executor.submit(_process_single_chunk, c) for c in chunks]
+                    for fut in concurrent.futures.as_completed(futures):
+                        chunk_results.append(fut.result())
+
+            chunk_results.sort(key=lambda x: x["part_index"])
+            duration = time.time() - t_all_start
+            usage_info = {
+                "total_input_tokens": sum(r["usage"].get("total_input_tokens", 0) for r in chunk_results),
+                "total_output_tokens": sum(r["usage"].get("total_output_tokens", 0) for r in chunk_results),
+                "total_thought_tokens": sum(r["usage"].get("total_thought_tokens", 0) for r in chunk_results),
+                "total_tool_use_tokens": sum(r["usage"].get("total_tool_use_tokens", 0) for r in chunk_results),
+                "total_tokens": sum(r["usage"].get("total_tokens", 0) for r in chunk_results),
+            }
+            csv_rows = shift_and_merge_chunk_edl_rows(chunk_results)
+            report_sections = [
+                f"## Part {r['part_index']}/{len(chunk_results)} "
+                f"(`{format_edl_timestamp(r['start_sec'])}` - `{format_edl_timestamp(r['end_sec'])}`)\n\n{r['report_md']}"
+                for r in chunk_results
+            ]
+            report_md = "\n\n---\n\n".join(report_sections)
+            response_text = report_md
+
         else:
-            response_text, usage_info, duration = generate_edl_content_standard(
-                video_uri, prompt_text, client=genai_client, model=args.model
+            if not video_uri:
+                video_uri = upload_file_to_gcs_with_cache(
+                    local_video_path,
+                    bucket_name=gcp_cfg["bucket"],
+                    gcs_prefix="raw",
+                    project=gcp_cfg["project"],
+                    region=gcp_cfg["region"],
+                    force_upload=args.force_upload,
+                )
+
+            prompt_text = _build_chunk_prompt(
+                base_prompt_text,
+                part_index=1,
+                total_parts=1,
+                start_sec=0.0,
+                end_sec=total_video_dur,
             )
 
-        # Parse CSV & Report
-        csv_rows, report_md = parse_edl_csv_and_report(response_text)
+            if args.processing == "agentic":
+                try:
+                    response_text, usage_info, duration = call_agentic_video_edl(
+                        video_uri,
+                        prompt_text,
+                        client=genai_client,
+                        model=args.model,
+                        max_output_tokens=args.max_output_tokens,
+                        thinking_budget=args.thinking_budget or calculate_dynamic_thinking_budget(total_video_dur),
+                        timeout_sec=float(args.timeout),
+                    )
+                except Exception as e:
+                    print(
+                        f"\n[Warning] Agentic processing encountered ({e}). Falling back to Vertex AI Standard Low-Res generateContent...",
+                        file=sys.stderr,
+                    )
+                    response_text, usage_info, duration = generate_edl_content_standard(
+                        video_uri,
+                        prompt_text,
+                        client=genai_client,
+                        model=args.model,
+                        max_output_tokens=args.max_output_tokens,
+                        thinking_budget=args.thinking_budget,
+                        video_duration_sec=total_video_dur,
+                    )
+            else:
+                print(f"\n[Step 2/3] 🤖 Calling Vertex AI Gemini model: {args.model} (Standard Low-Res Mode) ...")
+                response_text, usage_info, duration = generate_edl_content_standard(
+                    video_uri,
+                    prompt_text,
+                    client=genai_client,
+                    model=args.model,
+                    max_output_tokens=args.max_output_tokens,
+                    thinking_budget=args.thinking_budget,
+                    video_duration_sec=total_video_dur,
+                )
 
-        if not csv_rows:
+            csv_rows, report_md = parse_edl_csv_and_report(response_text)
+
+        if not csv_rows or len(csv_rows) <= 1:
             print("\n[Warning] Could not extract valid CSV rows from model output.", file=sys.stderr)
             raw_debug_path = edl_csv_path.replace(".csv", "_raw_output.txt")
             with open(raw_debug_path, "w", encoding="utf-8") as f:
@@ -424,6 +795,8 @@ def main():
             token_section += f"- **Output Tokens**: `{usage_info.get('total_output_tokens', 0):,}`\n"
             if usage_info.get("total_thought_tokens"):
                 token_section += f"- **Thought Tokens**: `{usage_info.get('total_thought_tokens', 0):,}`\n"
+            if usage_info.get("total_tool_use_tokens"):
+                token_section += f"- **Tool Use Tokens**: `{usage_info.get('total_tool_use_tokens', 0):,}`\n"
             token_section += f"- **Total Tokens**: `{usage_info.get('total_tokens', 0):,}`\n"
 
         validation_section = (
@@ -441,6 +814,11 @@ def main():
             sys.exit(1)
 
     finally:
+        if os.path.exists(chunks_dir):
+            shutil.rmtree(chunks_dir, ignore_errors=True)
+            print(f"  🗑️  Cleaned up temporary local chunk directory: {chunks_dir}")
+        for c_uri in temp_gcs_uris:
+            delete_gcs_blob(c_uri, project=gcp_cfg.get("project"))
         if args.cleanup_gcs and video_uri:
             delete_gcs_blob(video_uri, project=gcp_cfg.get("project"))
 

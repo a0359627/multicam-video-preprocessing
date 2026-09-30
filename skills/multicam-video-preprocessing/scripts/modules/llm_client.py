@@ -34,12 +34,14 @@ except ImportError:
         )
 
 
-def get_vertex_client(project=None, location=None):
+def get_vertex_client(project=None, location=None, timeout_ms=600_000):
     """
-    Initialize and return a Google GenAI Client backed exclusively by Vertex AI
+    Initialize and return a Google GenAI Client backed by Vertex AI
     with Application Default Credentials (`gcloud auth application-default login`).
+    Set HTTP timeout to 600,000 ms (600 seconds) for full-length video processing.
     """
     import google.genai as genai
+    from google.genai import types
 
     gcp_cfg = resolve_gcp_config(cli_project=project, cli_location=location)
     resolved_project = gcp_cfg.get("project")
@@ -53,10 +55,12 @@ def get_vertex_client(project=None, location=None):
             "  gcloud auth application-default login"
         )
 
+    http_options = types.HttpOptions(timeout=int(timeout_ms)) if timeout_ms else None
     return genai.Client(
         vertexai=True,
         project=resolved_project,
         location=resolved_location,
+        http_options=http_options,
     )
 
 

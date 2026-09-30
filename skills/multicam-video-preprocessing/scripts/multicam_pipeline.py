@@ -76,8 +76,12 @@ def main():
     parser.add_argument("--lufs", type=float, default=-14.0, help="Target integrated loudness in LUFS (default: -14.0)")
     parser.add_argument("--lra", type=float, default=11.0, help="Target loudness range in LU (default: 11.0)")
     parser.add_argument("--tp", type=float, default=-1.5, help="Maximum true peak limit in dBTP (default: -1.5)")
-    parser.add_argument("--video-bitrate", default="6000k", help="Video bitrate for re-encoding (default: 6000k)")
-    parser.add_argument("--audio-bitrate", default="192k", help="Audio bitrate for re-encoding (default: 192k)")
+    parser.add_argument("--video-bitrate", default="6000k", help="Video bitrate for synchronized NLE camera masters (default: 6000k)")
+    parser.add_argument("--audio-bitrate", default="192k", help="Audio bitrate for synchronized NLE camera masters (default: 192k)")
+    parser.add_argument("--grid-bitrate", default="1200k", help="Video bitrate for AI multi-in-one grid video (default: 1200k)")
+    parser.add_argument("--grid-audio-bitrate", default="64k", help="Audio bitrate for AI multi-in-one grid video (default: 64k)")
+    parser.add_argument("--grid-fps", type=int, default=10, help="Frame rate for AI multi-in-one grid video (default: 10)")
+    parser.add_argument("--grid-gop", type=int, default=10, help="Keyframe GOP interval in frames for AI multi-in-one grid video (default: 10)")
 
     # Performance Parameters
     parser.add_argument("--sr", type=int, default=8000, help="Audio sampling rate for FFT alignment in Hz (default: 8000)")
@@ -309,24 +313,18 @@ def main():
         # Step 4: Multi-in-One Full Grid Video Composition
         # ---------------------------------------------------------
         if args.merge:
-            print(f"\n[Step 4/4] 🔲 Rendering Multi-in-One grid video ({total_cams} CAMs, {cols}x{rows} grid, {cw}x{ch}/cell -> {tot_w}x{tot_h})...")
+            print(f"\n[Step 4/4] 🔲 Rendering Multi-in-One grid video ({total_cams} CAMs, {cols}x{rows} grid, {cw}x{ch}/cell -> {tot_w}x{tot_h}, {args.grid_fps}fps, GOP={args.grid_gop}, {args.grid_bitrate})...")
             synced_video_paths = [t["output"] for t in export_tasks]
             script_dir = args.output_dir or "."
             merged_video_path = os.path.join(script_dir, "multicam_merged_full.mp4")
             print(f"  ► Composing Multi-in-One grid video ({total_cams} CAMs -> {tot_w}x{tot_h}) → {os.path.basename(merged_video_path)} ...")
             t_comp = compose_multicam_video(
                 synced_video_paths, merged_video_path,
-                video_bitrate=args.video_bitrate, audio_bitrate=args.audio_bitrate,
+                video_bitrate=args.grid_bitrate, audio_bitrate=args.grid_audio_bitrate,
+                fps=args.grid_fps, gop=args.grid_gop,
                 encoder=args.encoder
             )
             print(f"    ✓ Composed {os.path.basename(merged_video_path)} in {t_comp:.1f}s")
-            # Create compatibility symlink/alias multicam_merged_synced.mp4
-            compat_path = os.path.join(script_dir, "multicam_merged_synced.mp4")
-            if not os.path.exists(compat_path):
-                try:
-                    os.symlink(os.path.basename(merged_video_path), compat_path)
-                except OSError:
-                    pass
         else:
             print(f"\n[Step 4/4] 🔲 Multi-in-One composition: Skipped (flag --merge not specified)")
 

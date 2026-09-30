@@ -21,8 +21,8 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Keep all generated documentation and validation reports in plain, professional technical text.
 - Always respond to the user in their prompt language (Traditional Chinese `zh-TW` when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.) and pass the matching `--lang` flag to validation scripts.
 
-## 4. Acoustic Ground Truth & Zero-Split Pipeline Integrity
+## 4. Acoustic Ground Truth & 3-Stage Pipeline Integrity
 - Execute the 3-Stage Gated Workflow sequentially (`multicam_pipeline.py` -> `generate_edl.py` -> `export_fcp7_xml.py` / `edl_to_video.py`) as specified in `skills/multicam-video-preprocessing/SKILL.md`.
-- All time alignments and EDL cut points must respect MFCC subframe acoustic alignment (<0.125ms) and the Zero-Split Agentic Video pipeline (`multicam_merged_full.mp4`).
-- Never split full-length footage into intermediate chapters or use legacy AI Studio API keys (`GEMINI_API_KEY`).
+- All time alignments and EDL cut points must respect MFCC subframe acoustic alignment (<0.125ms) and the unified grid video (`multicam_merged_full.mp4`). Long videos (>40 min) are automatically segmented at natural silence points inside `generate_edl.py` and stitched back into `edl_full.csv`.
+- Do NOT manually split footage into intermediate chapters outside `generate_edl.py` or use legacy AI Studio API keys (`GEMINI_API_KEY`).
 - Verify all required stage exit criteria files exist and are non-empty (`> 0 bytes`) before proceeding to the next stage or declaring task completion.

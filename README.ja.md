@@ -60,14 +60,14 @@ flowchart TD
         S1_1["1.1 MFCC 音響アライメント＆サブフレーム微調整 (<0.125 ms)"]:::stage1Style
         S1_2["1.2 EBU R128 2 パス線形ラウドネス正規化 (-14 LUFS)"]:::stage1Style
         S1_3["成果物 / マスター: フレーム精度同期マスター<br/>(CAM1_synced.mp4 .. CAMn_synced.mp4)"]:::outputStyle
-        S1_4["中間アーティファクト: マルチインワン全編グリッド動画<br/>(multicam_merged_full.mp4)"]:::artifactStyle
+        S1_4["中間アーティファクト: マルチインワン全編グリッド動画<br/>(multicam_merged_full.mp4, 10 fps / 1s GOP)"]:::artifactStyle
         S1_1 --> S1_2
         S1_2 --> S1_3
         S1_3 --> S1_4
     end
 
-    subgraph S2["Stage 2: Gemini 3.8 Flash Agentic Video ラフカット"]
-        S2_1["2.1 ゼロ分割 Agentic Video 推論<br/>(Vertex AI Gemini 3.8 Flash via GCS)"]:::stage2Style
+    subgraph S2["Stage 2: Gemini 3.8 Flash マルチモーダル動画ラフカット"]
+        S2_1["2.1 無音検出スマート分割 (30-40 分) ＆並列推論<br/>(MEDIA_RESOLUTION_LOW + 動的 Thinking Budget)"]:::stage2Style
         S2_2["2.2 8 項目決定論的 EDL 検証<br/>(6 ERROR + 2 WARN チェック)"]:::stage2Style
         EDL["中間アーティファクト: 統合 EDL ＆検証レポート<br/>(edl_full.csv + edl_full_report.md)"]:::artifactStyle
         S2_1 --> S2_2
@@ -126,8 +126,8 @@ flowchart TD
 
 ## 3 ステージ技術概要
 
-1. **Stage 1（マルチカメラ同期＆前処理）**：MFCC 音響アライメント＆サブフレーム微調整（`<0.125 ms`）、EBU R128（`-14 LUFS`）2 パス線形ラウドネス正規化、フレーム精度同期マスター出力（`CAM*_synced.mp4`）、およびゼロ分割グリッド合成（`multicam_merged_full.mp4`）を実行します。
-2. **Stage 2（Gemini 3.8 Flash Agentic Video ラフカット）**：**Vertex AI Gemini 3.8 Flash**（`processing="agentic"`）でカウントダウンやカチンコを自動除去して `edl_full.csv` を生成し、8 項目の決定論的 EDL 検証（`6 ERROR + 2 WARN`）を実行します。
+1. **Stage 1（マルチカメラ同期＆前処理）**：MFCC 音響アライメント＆サブフレーム微調整（`<0.125 ms`）、EBU R128（`-14 LUFS`）2 パス線形ラウドネス正規化、フレーム精度同期マスター出力（`CAM*_synced.mp4`, `20 Mbps`）、および軽量全編グリッド合成（`multicam_merged_full.mp4`, `10 fps`, `1.2 Mbps`, 1 秒短 GOP `-g 10`）を実行します。
+2. **Stage 2（Gemini 3.8 Flash マルチモーダルラフカット＆無音検出スマート分割）**：デフォルトで **Vertex AI Gemini 3.8 Flash** 標準マルチモーダルモード（`--processing standard`, `MEDIA_RESOLUTION_LOW` + 動的 `thinking_budget` `1024–4096`）を使用します。40 分を超える動画では 30〜40 分の自然な無音箇所で `<output_dir>/_edl_chunks/` に一時分割して並列推論し、`edl_full.csv` に統合した後、`finally` ブロックでローカルと GCS の一時チャンクを自動削除し、8 項目の決定論的 EDL 検証（`6 ERROR + 2 WARN`）を実行します。
 3. **Stage 3A & 3B（FCP7 XML タイムライン出力 / シングルパス動画レンダリング）**：NTSC 非整数フレームレート（`23.976`, `29.97`, `59.94`）やドロップフレームに対応した `final_cut_full.xml` の出力、または `final_cut_full.mp4` の直接レンダリングを行います。
 
 ---
@@ -136,7 +136,7 @@ flowchart TD
 
 | GCS パス接頭辞 (`matchesPrefix`) | 保存対象 | 保持期間 (`age`) | クリーンアップ動作 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 一時グリッド動画 (`multicam_merged_full.mp4`) | **2 日間 (`age: 2`)** | SHA-256 キャッシュ再利用のため 2 日間保持し、自動削除します。 |
+| **`raw/`** | 一時グリッド動画 (`multicam_merged_full.mp4`) ＆チャンク (`raw/edl_chunks/*`) | **2 日間 (`age: 2`)** | `raw/edl_chunks/*` は推論完了直後に `finally` で即時削除。全編動画は SHA-256 キャッシュ再利用のため 2 日間保持後に自動削除します。 |
 | **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV タイムライン、レンダリング動画、検証レポート | **15 日間 (`age: 15`)** | チーム確認用に 15 日間保持した後、自動削除します。 |
 
 ---
