@@ -129,11 +129,14 @@ def call_agentic_video_edl(gcs_uri, prompt_text, client, model="gemini-3.8-flash
                 f"\n  ⚠️ interactions.create encountered: {e}. Trying client.models.generate_content with MediaProcessing.AGENTIC..."
             )
             try:
-                # Fallback: client.models.generate_content with MediaProcessing.AGENTIC
-                part = types.Part(
-                    file_data=types.FileData(file_uri=gcs_uri, mime_type=mime_type),
-                    media_processing=types.MediaProcessing.AGENTIC,
-                )
+                # Fallback: client.models.generate_content
+                if hasattr(types, "MediaProcessing"):
+                    part = types.Part(
+                        file_data=types.FileData(file_uri=gcs_uri, mime_type=mime_type),
+                        media_processing=types.MediaProcessing.AGENTIC,
+                    )
+                else:
+                    part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
                 response = client.models.generate_content(
                     model=model,
                     contents=[part, prompt_text],
@@ -174,16 +177,28 @@ def generate_edl_content_standard(gcs_uri, prompt_text, client, model="gemini-3.
     from google.genai import types
 
     mime_type = guess_mime_type(gcs_uri)
+    media_res_enum = getattr(types, "MediaResolution", None)
+    target_res = getattr(media_res_enum, "MEDIA_RESOLUTION_LOW", None) if media_res_enum else None
+
+    part = types.Part(file_data=types.FileData(file_uri=gcs_uri, mime_type=mime_type))
+
+    config_kwargs = {
+        "temperature": 0.2,
+        "max_output_tokens": 16384,
+    }
+    if hasattr(types, "ThinkingConfig"):
+        config_kwargs["thinking_config"] = types.ThinkingConfig(thinking_budget=2048)
+    if hasattr(types, "AutomaticFunctionCallingConfig"):
+        config_kwargs["automatic_function_calling"] = types.AutomaticFunctionCallingConfig(disable=True)
+    if target_res is not None:
+        config_kwargs["media_resolution"] = target_res
+
     t0 = time.time()
     with LiveTicker(f"Vertex AI Gemini ({model}) analyzing video & computing EDL cuts"):
-        part = types.Part.from_uri(file_uri=gcs_uri, mime_type=mime_type)
         response = client.models.generate_content(
             model=model,
             contents=[part, prompt_text],
-            config=types.GenerateContentConfig(
-                temperature=0.2,
-                max_output_tokens=8192,
-            ),
+            config=types.GenerateContentConfig(**config_kwargs),
         )
     raw_output = response.text or ""
     usage_info = {}

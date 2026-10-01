@@ -99,7 +99,7 @@ def generate_grid_filter_complex(num_inputs, custom_cw=None, custom_ch=None, dra
         layout_parts.append(f"{x_expr}_{y_expr}")
 
     layout_str = "|".join(layout_parts)
-    stack_str = "".join(stack_inputs) + f"xstack=inputs={num_inputs}:layout={layout_str}:fill=black[out]"
+    stack_str = "".join(stack_inputs) + f"xstack=inputs={num_inputs}:layout={layout_str}[out]"
     return f"{';'.join(scale_parts)};{stack_str}"
 
 

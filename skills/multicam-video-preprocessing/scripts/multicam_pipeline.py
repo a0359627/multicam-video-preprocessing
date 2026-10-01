@@ -289,6 +289,9 @@ def main():
 
         def _export_single_task(stask):
             t_s_0 = time.time()
+            if os.path.exists(stask["output"]) and os.path.getsize(stask["output"]) > 1000000:
+                print(f"    ✓ [Cache hit] Synchronized master already exists: {os.path.basename(stask['output'])}")
+                return stask["name"], os.path.basename(stask["output"]), 0.0
             cut_single_clip(
                 stask["video"], stask["output"], stask["start"], stask["end"],
                 norm_audio_path=stask["audio"], copy_codec=args.stream_copy,

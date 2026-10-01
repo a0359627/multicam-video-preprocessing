@@ -130,7 +130,7 @@ def auto_discover_camera_files(media_dir):
     # 1. First priority: full synchronized camera master files (*_synced.mp4)
     synced_files = [
         os.path.join(media_dir, f) for f in all_files
-        if f.lower().endswith((".mp4", ".mov", ".mkv", ".m4v"))
+        if not f.startswith(".") and f.lower().endswith((".mp4", ".mov", ".mkv", ".m4v"))
         and "synced" in f.lower() and "merged" not in f.lower() and "final" not in f.lower()
     ]
     if synced_files:
@@ -139,7 +139,7 @@ def auto_discover_camera_files(media_dir):
     # 2. Fallback: any valid camera video files
     if not candidates:
         for f in all_files:
-            if any(f.lower().endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".m4v")):
+            if not f.startswith(".") and any(f.lower().endswith(ext) for ext in (".mp4", ".mov", ".mkv", ".m4v")):
                 if "merged" not in f.lower() and "final" not in f.lower() and "seg_" not in f.lower():
                     candidates.append(os.path.join(media_dir, f))
 
@@ -335,26 +335,27 @@ def build_fcp7_xml_sequence(all_part_clips, part_audio_list=None, seq_name="fina
         </video>
 """
 
-    # Audio Track Section: Master host audio (CAM1)
+    # Audio Track Section: Multi-camera continuous synchronized audio tracks
     part_audio_list = part_audio_list or []
     if part_audio_list:
         tracks_xml = ""
-        for track_idx in [1, 2]:
-            tracks_xml += f"""
-            <track>"""
-            for a_idx, a_part in enumerate(part_audio_list, start=1):
-                a_fpath = a_part["audio_path"]
-                a_url = format_path_for_xml(a_fpath)
-                a_fname = Path(a_fpath).name
-                a_master_id = "masterclip-CAM1-Audio"
-                a_clip_id = f"audio-track{track_idx}-item{a_idx}"
-                a_dur_frames = a_part["end_frame"] - a_part["start_frame"]
+        global_track_idx = 1
+        for a_idx, a_part in enumerate(part_audio_list, start=1):
+            a_name = a_part.get("name") or f"Audio Track {a_idx}"
+            a_fpath = a_part["audio_path"]
+            a_url = format_path_for_xml(a_fpath)
+            a_fname = Path(a_fpath).name
+            safe_master_id = f"masterclip-{a_name.replace(' ', '-').replace('(', '').replace(')', '')}"
+            a_dur_frames = a_part["end_frame"] - a_part["start_frame"]
 
-                a_file_node = create_file_node(a_master_id, a_fname, a_url, timebase, total_timeline_duration + 50000, width, height, drop_frame=drop_frame)
+            a_file_node = create_file_node(safe_master_id, a_fname, a_url, timebase, total_timeline_duration + 50000, width, height, drop_frame=drop_frame)
 
+            for ch_idx in [1, 2]:
+                clip_id = f"audio-track{global_track_idx}-item{a_idx}"
                 tracks_xml += f"""
-                <clipitem id="{a_clip_id}">
-                    <name>CAM1 Audio</name>
+            <track>
+                <clipitem id="{clip_id}">
+                    <name>{a_name}</name>
                     <enabled>TRUE</enabled>
                     <duration>{a_dur_frames}</duration>
                     <rate><timebase>{timebase}</timebase></rate>
@@ -365,11 +366,11 @@ def build_fcp7_xml_sequence(all_part_clips, part_audio_list=None, seq_name="fina
                     {a_file_node}
                     <sourcetrack>
                         <mediatype>audio</mediatype>
-                        <trackindex>{track_idx}</trackindex>
+                        <trackindex>{ch_idx}</trackindex>
                     </sourcetrack>
-                </clipitem>"""
-            tracks_xml += """
+                </clipitem>
             </track>"""
+                global_track_idx += 1
         xml_audio_body = f"<audio>{tracks_xml}</audio>"
     else:
         xml_audio_body = "<audio></audio>"
@@ -512,12 +513,22 @@ def export_fcp7_xml_pipeline(edl_files, output_path=None, media_dir=None, sync_j
         print(f"  [EDL {edl_idx}/{num_edls}] {edl_bname:<20} | {edl_clip_count} cuts | Duration: {edl_dur_sec:.2f}s")
         accumulated_offset += edl_max_out_frame
 
-    # Construct single continuous master host audio track (CAM1)
+    # Construct continuous synchronized master audio tracks for CAM1 and CAM2
     part_audio_list = []
     cam1_audio = cam_map.get("CAM1")
     if cam1_audio:
         part_audio_list.append({
+            "name": "CAM1 Audio (沈伯洋)",
             "audio_path": cam1_audio,
+            "start_frame": 0,
+            "end_frame": accumulated_offset,
+            "source_in": 0
+        })
+    cam2_audio = cam_map.get("CAM2")
+    if cam2_audio:
+        part_audio_list.append({
+            "name": "CAM2 Audio (工頭堅)",
+            "audio_path": cam2_audio,
             "start_frame": 0,
             "end_frame": accumulated_offset,
             "source_in": 0
