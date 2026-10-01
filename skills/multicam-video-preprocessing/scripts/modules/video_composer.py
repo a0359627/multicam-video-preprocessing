@@ -181,13 +181,15 @@ def compose_multicam_video(video_paths, output_path,
 def cut_single_clip(video_path, output_path, start_sec, end_sec,
                     norm_audio_path=None, copy_codec=False,
                     video_bitrate="6000k", audio_bitrate="192k",
+                    gop=30,
                     encoder="h264_videotoolbox"):
     """
     Cut video sub-clip with frame-accurate synchronization:
     - If copy_codec=True OR start_sec <= 0.001s (zero-offset anchor camera starting at IDR frame 0):
       uses lossless video stream-copy (-c:v copy) for instant export without re-encoding.
     - If copy_codec=False and start_sec > 0.001s: uses hardware-decoded (-hwaccel videotoolbox) and
-      hardware-encoded (h264_videotoolbox / libx264) frame-accurate cutting to prevent keyframe drift.
+      hardware-encoded (h264_videotoolbox / libx264) frame-accurate cutting with 1s GOP (-g 30)
+      to prevent keyframe drift and accelerate downstream EDL seeking.
     - If norm_audio_path is provided: muxes synchronized video with EBU R128 normalized audio.
     """
     if start_sec < 0:
@@ -219,6 +221,8 @@ def cut_single_clip(video_path, output_path, start_sec, end_sec,
                     c.extend(["-c:v", enc, "-b:v", video_bitrate, "-pix_fmt", "yuv420p"])
                 else:
                     c.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
+                if gop:
+                    c.extend(["-g", str(int(gop))])
                 c.extend(["-c:a", "copy", "-movflags", "+faststart"])
         else:
             c.extend([
@@ -233,6 +237,8 @@ def cut_single_clip(video_path, output_path, start_sec, end_sec,
                     c.extend(["-c:v", enc, "-b:v", video_bitrate, "-pix_fmt", "yuv420p"])
                 else:
                     c.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "18", "-pix_fmt", "yuv420p"])
+                if gop:
+                    c.extend(["-g", str(int(gop))])
                 c.extend(["-c:a", "aac", "-b:a", audio_bitrate, "-movflags", "+faststart"])
         c.append(output_path)
         return c

@@ -78,6 +78,7 @@ def main():
     parser.add_argument("--tp", type=float, default=-1.5, help="Maximum true peak limit in dBTP (default: -1.5)")
     parser.add_argument("--video-bitrate", default="6000k", help="Video bitrate for synchronized NLE camera masters (default: 6000k)")
     parser.add_argument("--audio-bitrate", default="192k", help="Audio bitrate for synchronized NLE camera masters (default: 192k)")
+    parser.add_argument("--master-gop", type=int, default=30, help="Keyframe GOP interval in frames for re-encoded NLE camera masters (default: 30, ~1s at 30fps)")
     parser.add_argument("--grid-bitrate", default="1200k", help="Video bitrate for AI multi-in-one grid video (default: 1200k)")
     parser.add_argument("--grid-audio-bitrate", default="64k", help="Audio bitrate for AI multi-in-one grid video (default: 64k)")
     parser.add_argument("--grid-fps", type=int, default=10, help="Frame rate for AI multi-in-one grid video (default: 10)")
@@ -296,11 +297,12 @@ def main():
         def _export_single_task(stask):
             t_s_0 = time.time()
             is_zero_offset = bool(args.stream_copy or stask["start"] <= 1e-3)
-            task_mode = "Zero-Offset Stream Copy (-c:v copy)" if is_zero_offset else f"Frame-Accurate Re-encode ({args.encoder})"
+            task_mode = "Zero-Offset Stream Copy (-c:v copy)" if is_zero_offset else f"Frame-Accurate Re-encode ({args.encoder}, GOP={args.master_gop})"
             cut_single_clip(
                 stask["video"], stask["output"], stask["start"], stask["end"],
                 norm_audio_path=stask["audio"], copy_codec=args.stream_copy,
                 video_bitrate=args.video_bitrate, audio_bitrate=args.audio_bitrate,
+                gop=args.master_gop,
                 encoder=args.encoder
             )
             return stask["name"], os.path.basename(stask["output"]), time.time() - t_s_0, task_mode

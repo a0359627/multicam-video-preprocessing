@@ -219,12 +219,14 @@ class TestGcpClient(unittest.TestCase):
         self.assertIn("copy", cmd_zero)
         self.assertNotIn("-hwaccel", cmd_zero)
 
-        # Case 2: start_sec > 0.001 -> hardware decode (-hwaccel videotoolbox) + re-encode (h264_videotoolbox)
+        # Case 2: start_sec > 0.001 -> hardware decode (-hwaccel videotoolbox) + re-encode (h264_videotoolbox) + 1s GOP (-g 30)
         cut_single_clip("cam2.mp4", "cam2_synced.mp4", start_sec=4.32, end_sec=604.32, copy_codec=False)
         cmd_offset = mock_run.call_args_list[-1][0][0]
         self.assertIn("-hwaccel", cmd_offset)
         self.assertIn("videotoolbox", cmd_offset)
         self.assertIn("h264_videotoolbox", cmd_offset)
+        self.assertIn("-g", cmd_offset)
+        self.assertIn("30", cmd_offset)
 
 
 if __name__ == "__main__":
