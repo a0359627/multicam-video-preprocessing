@@ -38,6 +38,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Support internal modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from modules.timeline_media import (load_sync_metadata, camera_sources, audio_sources,
+                                    mux_timeline_audio, canonical_camera, probe_media,
+                                    validate_source_range)
 try:
     from modules.edl_validator import (
         parse_edl_time_to_seconds,
@@ -276,14 +279,15 @@ def cut_segment_stream_copy(input_path, output_path, start_sec, end_sec):
 
 
 def cut_segment_reencode(input_path, output_path, start_sec, end_sec,
-                         encoder="h264_videotoolbox", video_bitrate="8000k", audio_bitrate="192k"):
+                         encoder="h264_videotoolbox", video_bitrate="8000k", audio_bitrate="192k",
+                         video_only=False):
     """
     Extract a segment using frame-accurate hardware-accelerated re-encoding with fast input seeking.
     """
     dur_sec = max(0.001, end_sec - start_sec)
     cmd = [
         "ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", format_seconds(start_sec),
+        "-ss", f"{start_sec:.9f}",
         "-i", input_path,
         "-t", format_seconds(dur_sec),
         "-c:v", encoder,
@@ -292,6 +296,14 @@ def cut_segment_reencode(input_path, output_path, start_sec, end_sec,
         "-b:a", audio_bitrate,
         output_path
     ]
+    if video_only:
+        # Timestamp rounding and encoder delay can shorten each -t segment.
+        # Use the exact EDL frame count so drift cannot accumulate across cuts.
+        duration_index = cmd.index("-t")
+        del cmd[duration_index:duration_index + 2]
+        fps = probe_media(input_path)["fps"]
+        cmd[-1:-1] = ["-an", "-vf", "setpts=PTS-STARTPTS",
+                      "-frames:v", str(max(1, round(dur_sec * fps)))]
     res = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     if res.returncode != 0:
         if encoder != "libx264":
@@ -335,7 +347,7 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
                         re_encode=True, encoder="h264_videotoolbox",
                         video_bitrate="8000k", audio_bitrate="192k",
                         workers=4, keep_temp=False, temp_dir=None,
-                        strict_edl=False, lang="en"):
+                        strict_edl=False, lang="en", sync_json=None):
     """
     Main pipeline to render an EDL CSV file into a final cut video.
     Default: Frame-accurate hardware-accelerated re-encoding with h264_videotoolbox.
@@ -356,11 +368,34 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
     media_dir = media_dir or edl_dir
 
     total_segments = len(segments)
-    cam_mapping = parse_camera_map(camera_map)
-
-    # Auto-discover cameras from media_dir if not specified
-    if not cam_mapping and media_dir:
-        cam_mapping = auto_discover_camera_files(media_dir)
+    metadata = load_sync_metadata(media_dir, sync_json)
+    cameras = camera_sources(media_dir, metadata)
+    supplied_map = parse_camera_map(camera_map)
+    for key, path in supplied_map.items():
+        key = canonical_camera(key)
+        resolved = resolve_media_file(path, media_dir=media_dir)
+        cameras[key] = {"name": key, "path": resolved, "offset": 0.0, **probe_media(resolved)}
+    cam_mapping = {key: source["path"] for key, source in cameras.items()}
+    sounds = audio_sources(cameras, metadata)
+    fps = next(iter(cameras.values()))["fps"]
+    # Use the same frame boundaries as the editable XML.
+    for segment in segments:
+        key = canonical_camera(segment["camera"])
+        if key not in cameras:
+            raise ValueError(f"Unknown camera: {key}")
+        segment["camera"] = key
+        if segment["end_sec"] is None or fps <= 0:
+            raise ValueError("EDL must have finite start/end times and media a valid frame rate")
+        segment["start_sec"] = round(segment["start_sec"] * fps) / fps
+        segment["end_sec"] = round(segment["end_sec"] * fps) / fps
+        if abs(cameras[key]["fps"] - fps) > 0.01:
+            raise ValueError("Mixed camera frame rates require conforming before rendering")
+        reference = next(iter(cameras.values()))
+        if (cameras[key]["width"], cameras[key]["height"]) != (reference["width"], reference["height"]):
+            raise ValueError("Mixed camera resolutions require conforming before rendering")
+        validate_source_range(cameras[key], segment["start_sec"], segment["end_sec"], 1 / fps)
+        for sound in sounds:
+            validate_source_range(sound, segment["start_sec"], segment["end_sec"], 1 / fps)
 
     known_cams = list(cam_mapping.keys()) if cam_mapping else None
     val_result = validate_edl_file(edl_path, known_cameras=known_cams, lang=lang)
@@ -439,7 +474,7 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
         if re_encode:
             cut_segment_reencode(
                 src, dst, s, e, encoder=encoder,
-                video_bitrate=video_bitrate, audio_bitrate=audio_bitrate
+                video_bitrate=video_bitrate, audio_bitrate=audio_bitrate, video_only=True
             )
         else:
             try:
@@ -467,7 +502,9 @@ def render_edl_to_video(edl_path, output_path=None, media_dir=None, camera_map=N
     # Step 2: Concatenate all segments
     print(f"\n[Step 2/2] 🔗 Concatenating all {total_segments} segments into final edited video...")
     concat_list_file = os.path.join(work_temp_dir, "concat_manifest.txt")
-    concatenate_segments(seg_outputs, output_path, concat_list_path=concat_list_file)
+    video_assembly = os.path.join(work_temp_dir, "picture_only.mp4")
+    concatenate_segments(seg_outputs, video_assembly, concat_list_path=concat_list_file)
+    mux_timeline_audio(video_assembly, output_path, sounds, segments, audio_bitrate)
 
     total_time = time.time() - t0
     file_size_mb = os.path.getsize(output_path) / (1024 * 1024)
@@ -494,6 +531,7 @@ def main():
     parser.add_argument("-o", "--output", default=None, help="Path to output video file (default: final_cut_full.mp4)")
     parser.add_argument("--media-dir", default=None, help="Directory containing source camera video files")
     parser.add_argument("--camera-map", default=None, help="Camera name to file mapping (e.g. CAM1=CAM1_synced.mp4,CAM2=CAM2_synced.mp4)")
+    parser.add_argument("--sync-json", default=None, help="Synchronization metadata (default: media-dir/multicam_sync.json)")
 
     # Encoding options
     parser.add_argument("--stream-copy", action="store_true", help="Force raw stream-copy without re-encoding (may cause non-keyframe glitches)")
@@ -518,6 +556,7 @@ def main():
             output_path=args.output,
             media_dir=args.media_dir,
             camera_map=args.camera_map,
+            sync_json=args.sync_json,
             re_encode=not args.stream_copy,
             encoder=args.encoder,
             video_bitrate=args.video_bitrate,

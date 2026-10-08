@@ -1,14 +1,14 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "multicam-video-preprocessing",
-  "version": "1.6.0",
-  "description": "Universal multi-camera video processing pipeline and AI editing suite for 2 to 6 cameras. Features MFCC acoustic time alignment with subframe refinement (<0.125ms), EBU R128 loudness normalization (-14 LUFS), multi-in-one compact grid composition, Gemini 3.8 Flash Agentic Video zero-split full pipeline, deterministic 8-check EDL semantic validation with strict gate safeguard, FCP7 XML timeline export, and single-pass hardware video rendering.",
+  "version": "1.6.1",
+  "description": "Multi-camera preprocessing and AI rough-cut suite for 2 to 6 cameras. Supports optional automatically aligned external master audio, camera-audio fallback without OBS, portable FCP7 XML and MP4 delivery, job-isolated GCS uploads, full-length Vertex AI analysis, and deterministic EDL validation. Maintained fork of sylphlin/multicam-video-preprocessing.",
   "author": {
     "name": "sylphlin",
     "url": "https://github.com/sylphlin"
   },
-  "homepage": "https://github.com/sylphlin/multicam-video-preprocessing",
-  "repository": "https://github.com/sylphlin/multicam-video-preprocessing",
+  "homepage": "https://github.com/a0359627/multicam-video-preprocessing",
+  "repository": "https://github.com/a0359627/multicam-video-preprocessing",
   "license": "MIT",
   "keywords": [
     "multicam",

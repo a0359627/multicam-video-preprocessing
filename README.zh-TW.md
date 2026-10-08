@@ -14,35 +14,33 @@
 
 ---
 
-## 安裝與 Google Cloud 環境設定 (`setup.sh`)
+## 安裝此 fork 與本機授權
 
-本專案符合 [Agent Plugins 1.0](https://agent-plugins.org/) 規範，全程基於 **Google Cloud Vertex AI (ADC)** 與 **Cloud Storage (GCS)** 運作，免除管理 API Key。
+請使用 [a0359627 的 fork](https://github.com/a0359627/multicam-video-preprocessing)，指定 `feat/gemini-3.8-test-c-workflow` 分支。原作者為 [sylphlin](https://github.com/sylphlin/multicam-video-preprocessing)，本版保留三階段、全長影片工作流。完整步驟見 [同事安裝與使用指南](docs/INSTALL.zh-TW.md)。
 
-### 1. 安裝為 Antigravity Plugin 或 Skill
-
-- **全域 Plugin（建議）**：
-  ```bash
-  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
-  ```
-- **全域 Skill**：
-  ```bash
-  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/skills/multicam-video-preprocessing
-  ```
-
-### 2. 安裝相依套件與一鍵配置雲端環境 (`setup.sh`)
+需要 Python >= 3.10，建議 3.11 或 3.12；另外安裝 FFmpeg（含 ffprobe）、Git 與 Google Cloud CLI。以下終端機範例以 macOS 為準；Windows 安裝與剪輯軟體匯入尚未驗證。
 
 ```bash
-# 1. 安裝 FFmpeg 與 Python 套件
-brew install ffmpeg
-pip install numpy google-genai google-cloud-storage requests
-
-# 2. 授權 Google Cloud ADC 憑證
+git clone --branch feat/gemini-3.8-test-c-workflow --single-branch https://github.com/a0359627/multicam-video-preprocessing.git
+cd multicam-video-preprocessing
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 gcloud auth application-default login
-
-# 3. 執行 setup.sh 自動配置 GCS 儲存桶、雙層生命週期規則（raw: 2 天、產出物: 15 天）、IAM 與 .env
-chmod +x setup.sh
-./setup.sh --project YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project panmedia-internal-ge
+export GOOGLE_CLOUD_PROJECT=panmedia-internal-ge
+export GOOGLE_CLOUD_LOCATION=global
+export GCS_BUCKET=panmedia-test-488409-agent-staging
 ```
+
+已獲授權的同事使用既有 project 與 bucket。**新電腦安裝不要執行 `setup.sh`**：它會建立或修改雲端資源、IAM 與生命週期，僅供管理員明確要另建環境時使用。每人以自己的帳號登入，不複製他人的 ADC、token 或 `.env`。若裝成 plugin，也須把同一 fork、同一分支 clone 到 plugin 目錄，再於該處安裝依賴與登入。
+
+## 外錄母帶可選，上傳自動分開
+
+- Stage 1 可加 `--master-audio /path/to/OBS.mkv` 或 WAV 錄音檔，自動以聲音對齊參考相機並寫入 `multicam_sync.json`。對齊可信度低或母帶不足以涵蓋所需時間時停止，不使用固定偏移、個人素材路徑或固定影格率／解析度。
+- **沒有 OBS 也能輸出 XML 與 MP4。** 不指定 `--master-audio` 時使用已同步機位音訊。兩台機位皆為立體聲時，XML 保留四軌機位音訊；加入立體聲母帶則六軌，預設啟用母帶、保留但關閉機位聲音。單聲道素材依實際聲道數保留。MP4 有母帶就使用對齊母帶，沒有則以每路 `1/N` 連續混合已同步機位聲音；XML 保留相應音量供剪輯師調整。聲學同步需要各素材共同錄到的聲音。
+- 每次工作自動上傳到 `raw/<工作唯一編號>/<檔名>`。同次執行內的重試沿用該物件，重新啟動另一次工作則重新上傳；本機不必改名。`--cleanup-gcs` 只清理本次上傳的物件，不刪除直接提供的 `gs://` 輸入。既有生命週期維持 `raw/` 2 天、交付物 15 天。
+- 每組素材使用獨立本機輸出目錄。XML 匯入剪輯軟體後，確認媒體連結及首／中／尾影音同步；成功匯出不等於剪輯品質已接受。
 
 ### 專案目錄結構（Agent Plugins 1.0 標準規範）
 ```text
@@ -60,7 +58,7 @@ multicam-video-preprocessing/
 │       │   ├── edl_to_video.py                           # Stage 3B: 單次硬體加速影片渲染（次要路徑）
 │       │   └── modules/                                  # 聲學、視訊、驗證器與 GCP/Vertex AI 模組
 │       └── assets/                                       # 提示詞規範實體目錄 (SSOT)
-│           └── edl_interview_template.md                 # Gemini 多模態訪談粗剪規則
+│           └── prompt_c_portable.md                 # Gemini 多模態訪談粗剪規則
 ├── scripts -> skills/multicam-video-preprocessing/scripts # 根目錄 POSIX Symlink（供 CLI 與測試直接引用）
 ├── assets -> skills/multicam-video-preprocessing/assets   # 根目錄 POSIX Symlink
 ├── AGENTS.md                                             # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
@@ -175,11 +173,11 @@ flowchart TD
 
 ---
 
-## GCS 雙層生命週期規則 (`gs://multicam-video-${PROJECT_ID}`)
+## GCS 雙層生命週期規則 (`gs://<GCS_BUCKET>`)
 
 | GCS 路徑前綴 (`matchesPrefix`) | 儲存內容 | 保留天數 (`age`) | 清理機制 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 暫存網格影片 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 快取重用，期滿自動刪除。 |
+| **`raw/`** | 暫存網格影片 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 每次工作使用獨立路徑，2 天後自動清理；不跨工作重用快取。 |
 | **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 時間軸、渲染成品與驗證報告 | **15 天 (`age: 15`)** | 保留 15 天供團隊下載與審閱，期滿自動清理。 |
 
 ---

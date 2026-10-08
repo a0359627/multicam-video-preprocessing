@@ -91,9 +91,9 @@ def normalize_all_audio_tracks(all_videos, tmpdir, lufs=-14.0, lra=11.0, tp=-1.5
     t0 = time.time()
     audio_map = {}
 
-    for v in all_videos:
+    for index, v in enumerate(all_videos, start=1):
         base, _ = os.path.splitext(os.path.basename(v))
-        out_a = os.path.join(tmpdir, f"{base}_norm.m4a")
+        out_a = os.path.join(tmpdir, f"CAM{index}_{base}_norm.m4a")
         audio_map[v] = out_a
 
     print(f"  [LOUDNORM] Normalizing {len(all_videos)} audio tracks to EBU R128 ({lufs} LUFS, Two-pass Linear)...")

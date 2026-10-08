@@ -10,7 +10,7 @@ Features:
       1. Synchronized Camera Masters (Default): References aligned camera master files (*_synced.mp4).
       2. Raw Original Camera Linking (--use-raw-media): Uses multicam_sync.json global sync offsets to link directly to full un-sliced camera originals.
   - Rich Timeline Markers: Color-coded markers for editing rules ([強制] -> Red, [一般] -> Blue) with full reason comments.
-  - Multi-Track Audio Mapping: Synchronized master host audio tracks (CAM1) across the entire sequence timeline.
+  - Multi-Track Audio Mapping: Continuous camera mix or an automatically aligned optional master.
   - Safe URI Path Encoding: Robust path cleaning and URL-encoding (file://localhost/...) for cross-platform NLE relinking.
 
 Usage Examples:
@@ -32,6 +32,7 @@ from pathlib import Path
 import re
 import sys
 import urllib.parse
+import xml.etree.ElementTree as ET
 
 # Support internal modules
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -40,6 +41,9 @@ try:
 except ImportError:
     from scripts.modules.edl_validator import validate_edl_file, format_validation_report
 
+
+from modules.timeline_media import (load_sync_metadata, camera_sources, audio_sources,
+                                    canonical_camera, validate_source_range)
 
 DEFAULT_FPS = 30
 DEFAULT_WIDTH = 1920
@@ -246,323 +250,195 @@ def create_file_node(file_id, filename, file_url, timebase, duration, width, hei
 def build_fcp7_xml_sequence(all_part_clips, part_audio_list=None, seq_name="final_cut_full",
                             fps=DEFAULT_FPS, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
                             drop_frame=False):
-    """
-    Construct standard Final Cut Pro 7 XML (xmeml version 4) content matching working reference.
-    """
-    total_timeline_duration = all_part_clips[-1]["timeline_end"] if all_part_clips else 0
-    timebase, is_ntsc = resolve_fps_characteristics(fps)
-    ntsc_str = "TRUE" if is_ntsc else "FALSE"
-    display_format = "DF" if drop_frame else "NDF"
-
-    xml_header = f"""<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE xmeml>
-<xmeml version="4">
-<sequence id="sequence-1">
-    <name>{seq_name}</name>
-    <duration>{total_timeline_duration}</duration>
-    <rate>
-        <timebase>{timebase}</timebase>
-        <ntsc>{ntsc_str}</ntsc>
-    </rate>
-    <timecode>
-        <rate>
-            <timebase>{timebase}</timebase>
-            <ntsc>{ntsc_str}</ntsc>
-        </rate>
-        <string>00:00:00:00</string>
-        <frame>0</frame>
-        <displayformat>{display_format}</displayformat>
-    </timecode>
-    <media>
-        <video>
-            <format>
-                <samplecharacteristics>
-                    <rate><timebase>{timebase}</timebase></rate>
-                    <width>{width}</width>
-                    <height>{height}</height>
-                    <pixelaspectratio>square</pixelaspectratio>
-                </samplecharacteristics>
-            </format>
-            <track>
-"""
-
-    xml_video_body = ""
-    file_id_map = {}
-
-    for i, clip in enumerate(all_part_clips, start=1):
-        cam_key = clip["camera"]
-        real_file_path = clip.get("file_path") or f"MISSING_{cam_key}.mp4"
-        file_url = format_path_for_xml(real_file_path)
-        filename = Path(real_file_path).name
-
-        lookup_key = cam_key
-        if lookup_key not in file_id_map:
-            file_id_map[lookup_key] = f"masterclip-{lookup_key}"
-
-        master_file_id = file_id_map[lookup_key]
-        clip_id = f"video-item-{i}"
-        clip_dur = clip["source_out"] - clip["source_in"]
-
-        file_node = create_file_node(master_file_id, filename, file_url, timebase, total_timeline_duration + 50000, width, height, drop_frame=drop_frame)
-
-        marker_color = "(255,0,0)" if "[強制]" in clip["rule"] else "(0,0,255)"
-        clean_rule = clip["rule"].replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-        clean_reason = clip["reason"].replace('"', "&quot;").replace("<", "&lt;").replace(">", "&gt;")
-
-        xml_video_body += f"""
-                <clipitem id="{clip_id}">
-                    <name>{cam_key}</name>
-                    <enabled>TRUE</enabled>
-                    <duration>{clip_dur}</duration>
-                    <rate><timebase>{timebase}</timebase></rate>
-                    <start>{clip['timeline_start']}</start>
-                    <end>{clip['timeline_end']}</end>
-                    <in>{clip['source_in']}</in>
-                    <out>{clip['source_out']}</out>
-                    {file_node}
-                    <marker>
-                        <name>{clean_rule}</name>
-                        <comment>{clean_reason}</comment>
-                        <in>{clip['source_in']}</in>
-                        <out>{clip['source_in'] + 1}</out>
-                        <rgb>{marker_color}</rgb>
-                    </marker>
-                </clipitem>
-"""
-
-    xml_video_end = """
-            </track>
-        </video>
-"""
-
-    # Audio Track Section: Multi-camera continuous synchronized audio tracks
-    part_audio_list = part_audio_list or []
-    if part_audio_list:
-        tracks_xml = ""
-        global_track_idx = 1
-        for a_idx, a_part in enumerate(part_audio_list, start=1):
-            a_name = a_part.get("name") or f"Audio Track {a_idx}"
-            a_fpath = a_part["audio_path"]
-            a_url = format_path_for_xml(a_fpath)
-            a_fname = Path(a_fpath).name
-            safe_master_id = f"masterclip-{a_name.replace(' ', '-').replace('(', '').replace(')', '')}"
-            a_dur_frames = a_part["end_frame"] - a_part["start_frame"]
-
-            a_file_node = create_file_node(safe_master_id, a_fname, a_url, timebase, total_timeline_duration + 50000, width, height, drop_frame=drop_frame)
-
-            for ch_idx in [1, 2]:
-                clip_id = f"audio-track{global_track_idx}-item{a_idx}"
-                tracks_xml += f"""
-            <track>
-                <clipitem id="{clip_id}">
-                    <name>{a_name}</name>
-                    <enabled>TRUE</enabled>
-                    <duration>{a_dur_frames}</duration>
-                    <rate><timebase>{timebase}</timebase></rate>
-                    <start>{a_part['start_frame']}</start>
-                    <end>{a_part['end_frame']}</end>
-                    <in>{a_part['source_in']}</in>
-                    <out>{a_part['source_in'] + a_dur_frames}</out>
-                    {a_file_node}
-                    <sourcetrack>
-                        <mediatype>audio</mediatype>
-                        <trackindex>{ch_idx}</trackindex>
-                    </sourcetrack>
-                </clipitem>
-            </track>"""
-                global_track_idx += 1
-        xml_audio_body = f"<audio>{tracks_xml}</audio>"
-    else:
-        xml_audio_body = "<audio></audio>"
-
-    xml_footer = "</media></sequence></xmeml>\n"
-    return xml_header + xml_video_body + xml_video_end + xml_audio_body + xml_footer
+    """Write true source metadata and editable, level-matched audio tracks."""
+    root = ET.Element("xmeml", version="4")
+    sequence = ET.SubElement(root, "sequence", id="sequence-1")
+    def add(parent, tag, value):
+        ET.SubElement(parent, tag).text = str(value)
+    def rate(parent, value=fps):
+        tb, ntsc = resolve_fps_characteristics(value)
+        node = ET.SubElement(parent, "rate")
+        add(node, "timebase", tb)
+        add(node, "ntsc", "TRUE" if ntsc else "FALSE")
+    duration = all_part_clips[-1]["timeline_end"]
+    add(sequence, "name", seq_name)
+    add(sequence, "duration", duration)
+    rate(sequence)
+    tc = ET.SubElement(sequence, "timecode")
+    rate(tc)
+    add(tc, "string", "00:00:00:00")
+    add(tc, "frame", 0)
+    add(tc, "displayformat", "DF" if drop_frame else "NDF")
+    media = ET.SubElement(sequence, "media")
+    video = ET.SubElement(media, "video")
+    sample = ET.SubElement(ET.SubElement(video, "format"), "samplecharacteristics")
+    rate(sample)
+    add(sample, "width", width)
+    add(sample, "height", height)
+    add(sample, "pixelaspectratio", "square")
+    files = {}
+    def file_node(parent, path, info, video_media):
+        if path in files:
+            ET.SubElement(parent, "file", id=files[path])
+            return
+        file_id = "file-" + str(len(files) + 1)
+        files[path] = file_id
+        node = ET.SubElement(parent, "file", id=file_id)
+        add(node, "name", os.path.basename(path))
+        add(node, "pathurl", Path(path).resolve().as_uri())
+        source_fps = (info.get("fps") or fps) if video_media else fps
+        rate(node, source_fps)
+        add(node, "duration", round(info["duration"] * source_fps))
+        source_tc = ET.SubElement(node, "timecode")
+        rate(source_tc, source_fps)
+        add(source_tc, "string", "00:00:00:00")
+        add(source_tc, "frame", 0)
+        add(source_tc, "displayformat", "NDF")
+        source_media = ET.SubElement(node, "media")
+        if video_media:
+            sample = ET.SubElement(ET.SubElement(source_media, "video"), "samplecharacteristics")
+            rate(sample, info.get("fps") or fps)
+            add(sample, "width", info.get("width") or width)
+            add(sample, "height", info.get("height") or height)
+            add(sample, "pixelaspectratio", "square")
+        if info.get("channels"):
+            source_audio = ET.SubElement(source_media, "audio")
+            sample = ET.SubElement(source_audio, "samplecharacteristics")
+            add(sample, "depth", AUDIO_DEPTH)
+            add(sample, "samplerate", info.get("sample_rate") or AUDIO_SAMPLE_RATE)
+            add(source_audio, "channelcount", info["channels"])
+            if info["channels"] in (1, 2):
+                add(source_audio, "layout", "mono" if info["channels"] == 1 else "stereo")
+    track = ET.SubElement(video, "track")
+    for index, clip in enumerate(all_part_clips, 1):
+        node = ET.SubElement(track, "clipitem", id=f"video-{index}")
+        add(node, "name", clip["camera"])
+        add(node, "enabled", "TRUE")
+        add(node, "duration", clip["timeline_end"] - clip["timeline_start"])
+        rate(node)
+        for tag, key in (("start", "timeline_start"), ("end", "timeline_end"), ("in", "source_in"), ("out", "source_out")):
+            add(node, tag, clip[key])
+        file_node(node, clip["file_path"], clip["media_info"], True)
+        marker = ET.SubElement(node, "marker")
+        add(marker, "name", clip.get("rule", ""))
+        add(marker, "comment", clip.get("reason", ""))
+        add(marker, "in", clip["source_in"])
+        add(marker, "out", clip["source_in"] + 1)
+    audio = ET.SubElement(media, "audio")
+    add(audio, "channelcount", 2)
+    outputs = ET.SubElement(audio, "outputs")
+    group = ET.SubElement(outputs, "group")
+    add(group, "index", 1)
+    add(group, "numchannels", 2)
+    add(group, "downmix", 0)
+    for output_channel in (1, 2):
+        add(ET.SubElement(group, "channel"), "index", output_channel)
+    track_index = 0
+    for source in part_audio_list or []:
+        for channel in range(1, source["channels"] + 1):
+            track_index += 1
+            track = ET.SubElement(audio, "track")
+            add(track, "enabled", "TRUE" if source["enabled"] else "FALSE")
+            if source["channels"] == 2:
+                add(track, "outputchannelindex", channel)
+            for index, span in enumerate(source["spans"], 1):
+                node = ET.SubElement(track, "clipitem", id=f"audio-{track_index}-{index}")
+                add(node, "name", f"{source['name']} ch{channel}")
+                add(node, "enabled", "TRUE" if source["enabled"] else "FALSE")
+                add(node, "duration", span["end"] - span["start"])
+                rate(node)
+                for tag in ("start", "end", "in", "out"):
+                    add(node, tag, span[tag])
+                # A recorder container may have a different video frame rate.
+                # Its audio uses sequence-frame coordinates, never recorder video frames.
+                file_node(node, source["path"], source,
+                          source["name"] != "Master Mix" and bool(source.get("fps")))
+                st = ET.SubElement(node, "sourcetrack")
+                add(st, "mediatype", "audio")
+                add(st, "trackindex", channel)
+                effect = ET.SubElement(ET.SubElement(node, "filter"), "effect")
+                add(effect, "name", "Audio Levels")
+                add(effect, "effectid", "audiolevels")
+                add(effect, "effectcategory", "audio")
+                add(effect, "effecttype", "audio")
+                parameter = ET.SubElement(effect, "parameter")
+                add(parameter, "parameterid", "level")
+                add(parameter, "name", "Level")
+                add(parameter, "value", source["gain"])
+    ET.indent(root, space="  ")
+    return '<?xml version="1.0" encoding="UTF-8"?>\n<!DOCTYPE xmeml>\n' + ET.tostring(root, encoding="unicode") + "\n"
 
 
 def export_fcp7_xml_pipeline(edl_files, output_path=None, media_dir=None, sync_json=None,
-                             fps=DEFAULT_FPS, width=DEFAULT_WIDTH, height=DEFAULT_HEIGHT,
+                             fps=None, width=None, height=None,
                              use_raw_media=False, drop_frame=False, strict_edl=False,
                              lang="en"):
-    """
-    Main pipeline to convert sequential EDL CSVs into a continuous FCP7 XML sequence.
-    """
     if not edl_files:
-        raise ValueError("No EDL CSV files provided for XML export.")
-
-    fps = float(fps)
-    timebase, is_ntsc = resolve_fps_characteristics(fps)
-    if drop_frame and not is_ntsc:
-        print(f"[Error] --drop-frame is only valid for NTSC frame rates (23.976, 29.97, 59.94). Specified rate: {fps}", file=sys.stderr)
-        sys.exit(1)
-
+        raise ValueError("No EDL CSV files provided for XML export")
     edl_files = sorted(edl_files, key=natural_sort_key)
-    num_edls = len(edl_files)
-
-    # Resolve output XML path
-    if not output_path:
-        first_dir = os.path.dirname(os.path.abspath(edl_files[0]))
-        if num_edls == 1:
-            base_name = os.path.splitext(os.path.basename(edl_files[0]))[0]
-            output_path = os.path.join(first_dir, f"{base_name.replace('edl_', 'final_cut_')}.xml")
-        else:
-            output_path = os.path.join(first_dir, "final_cut_full.xml")
-
     media_dir = media_dir or os.path.dirname(os.path.abspath(edl_files[0]))
-
-    # Load sync_json metadata if available
-    sync_metadata = None
-    if sync_json and os.path.exists(sync_json):
-        with open(sync_json, "r", encoding="utf-8") as f:
-            sync_metadata = json.load(f)
-    elif os.path.exists(os.path.join(media_dir, "multicam_sync.json")):
-        with open(os.path.join(media_dir, "multicam_sync.json"), "r", encoding="utf-8") as f:
-            sync_metadata = json.load(f)
-
-    print("\n" + "=" * 78)
-    print(f"🎬  FCP7 XML Exporter: Converting {num_edls} EDL File(s) to Final Cut Pro 7 XML")
-    print("=" * 78)
-    print(f"  • Target XML Output : {output_path}")
-    print(f"  • Media Directory   : {media_dir}")
-    print(f"  • Sequence Rate     : {fps} fps ({width}x{height})")
-    print(f"  • Media Source Mode : {'Original Raw Camera Footage' if use_raw_media else 'Synchronized Camera Masters (*_synced.mp4)'}")
-    print("-" * 78)
-
-    # Auto-discover camera files in media directory
-    cam_map = auto_discover_camera_files(media_dir)
-
-    # Prepare raw camera map & global trim offsets if use_raw_media is requested
-    raw_cam_map = {}
-    raw_offset_map = {}
-    if use_raw_media and sync_metadata:
-        trim_meta = sync_metadata.get("trim") or {}
-        ref_start_str = trim_meta.get("ref_start") or "0"
-        t_ref_start_sec = time_str_to_frames(ref_start_str, fps) / fps if ref_start_str else 0.0
-
-        cams_info = sync_metadata.get("cameras", [])
-        for c_idx, c_info in enumerate(cams_info, start=1):
-            c_key = f"CAM{c_idx}"
-            c_name = c_info.get("camera", "")
-            if c_info.get("is_ref"):
-                c_offset = t_ref_start_sec
-                raw_fpath = sync_metadata.get("ref_video") or c_name
-            else:
-                c_offset = t_ref_start_sec - c_info.get("offset_sec", 0.0)
-                raw_fpath = c_name
-
-            if not os.path.isabs(raw_fpath) and media_dir:
-                candidate_fpath = os.path.join(media_dir, raw_fpath)
-                if os.path.exists(candidate_fpath):
-                    raw_fpath = candidate_fpath
-
-            raw_cam_map[c_key] = os.path.abspath(raw_fpath)
-            raw_offset_map[c_key] = c_offset
-
-    all_timeline_clips = []
-    accumulated_offset = 0
-
-    for edl_idx, edl_path in enumerate(edl_files, start=1):
-        edl_bname = os.path.basename(edl_path)
-        known_cams = list(cam_map.keys()) if cam_map else None
-        val_result = validate_edl_file(edl_path, known_cameras=known_cams, lang=lang)
-        print(f"\n{format_validation_report(val_result, lang=lang)}")
-        if val_result.has_error and strict_edl:
-            print(f"\n[Error] EDL validation failed with errors for {edl_bname} under --strict-edl mode.", file=sys.stderr)
-            sys.exit(1)
-
+    output_path = output_path or os.path.join(media_dir, "final_cut_full.xml")
+    metadata = load_sync_metadata(media_dir, sync_json)
+    cameras = camera_sources(media_dir, metadata, raw=use_raw_media)
+    first = next(iter(cameras.values()))
+    fps = float(fps or first["fps"])
+    width, height = int(width or first["width"]), int(height or first["height"])
+    if fps <= 0 or width <= 0 or height <= 0:
+        raise ValueError("Cannot determine video frame rate or dimensions")
+    if drop_frame and not resolve_fps_characteristics(fps)[1]:
+        raise ValueError("--drop-frame requires an NTSC frame rate")
+    sounds = audio_sources(cameras, metadata, include_disabled=True)
+    for sound in sounds:
+        sound["spans"] = []
+    clips, cursor = [], 0
+    for edl_path in edl_files:
+        validation = validate_edl_file(edl_path, known_cameras=list(cameras), lang=lang)
+        print(format_validation_report(validation, lang=lang))
+        if validation.has_error and strict_edl:
+            raise ValueError("EDL validation failed under --strict-edl")
         records = load_edl_csv_records(edl_path)
         if not records:
-            print(f"  [Warning] No valid records in {edl_bname}, skipping...")
-            continue
-
-        edl_clip_count = len(records)
-        edl_max_out_frame = 0
-
-        for rec in records:
-            in_frame = time_str_to_frames(rec["start_str"], fps)
-            out_frame = time_str_to_frames(rec["end_str"], fps)
-            if out_frame > edl_max_out_frame:
-                edl_max_out_frame = out_frame
-
-            cam_name = rec["camera"].strip()
-            cam_upper = cam_name.upper()
-
-            # Resolve file path and frame points
-            if use_raw_media and cam_upper in raw_offset_map:
-                raw_start_sec = raw_offset_map[cam_upper]
-                global_offset_frames = int(round(raw_start_sec * fps))
-                source_in = global_offset_frames + in_frame
-                source_out = global_offset_frames + out_frame
-                fpath = raw_cam_map.get(cam_upper) or cam_map.get(cam_upper)
+            raise ValueError(f"No valid EDL rows: {edl_path}")
+        for record in records:
+            key = canonical_camera(record["camera"])
+            if key not in cameras:
+                raise ValueError(f"Unknown camera: {record['camera']}")
+            source = cameras[key]
+            if abs(source["fps"] - fps) > 0.01:
+                raise ValueError("Mixed camera/sequence frame rates require conforming before export")
+            start = time_str_to_frames(record["start_str"], fps)
+            end = time_str_to_frames(record["end_str"], fps)
+            length = end - start
+            if length <= 0:
+                raise ValueError("EDL cut is shorter than one frame")
+            validate_source_range(source, start / fps, end / fps, tolerance=1 / fps)
+            source_in = round((start / fps + source["offset"]) * fps)
+            clip = {"camera": key, "file_path": source["path"], "media_info": source,
+                    "source_in": source_in, "source_out": source_in + length,
+                    "timeline_start": cursor, "timeline_end": cursor + length,
+                    "rule": record["rule"], "reason": record["reason"]}
+            if clips and clips[-1]["camera"] == key and clips[-1]["source_out"] == source_in:
+                clips[-1]["timeline_end"] += length
+                clips[-1]["source_out"] += length
+                clips[-1]["reason"] += " / " + record["reason"]
             else:
-                fpath = cam_map.get(cam_upper) or cam_map.get(cam_name)
-                source_in = in_frame
-                source_out = out_frame
-
-            all_timeline_clips.append({
-                "camera": cam_name,
-                "file_path": fpath,
-                "source_in": source_in,
-                "source_out": source_out,
-                "timeline_start": accumulated_offset + in_frame,
-                "timeline_end": accumulated_offset + out_frame,
-                "rule": rec["rule"],
-                "reason": rec["reason"]
-            })
-
-        edl_dur_sec = edl_max_out_frame / fps
-        print(f"  [EDL {edl_idx}/{num_edls}] {edl_bname:<20} | {edl_clip_count} cuts | Duration: {edl_dur_sec:.2f}s")
-        accumulated_offset += edl_max_out_frame
-
-    # Construct continuous synchronized master audio tracks for CAM1 and CAM2
-    part_audio_list = []
-    cam1_audio = cam_map.get("CAM1")
-    if cam1_audio:
-        part_audio_list.append({
-            "name": "CAM1 Audio (沈伯洋)",
-            "audio_path": cam1_audio,
-            "start_frame": 0,
-            "end_frame": accumulated_offset,
-            "source_in": 0
-        })
-    cam2_audio = cam_map.get("CAM2")
-    if cam2_audio:
-        part_audio_list.append({
-            "name": "CAM2 Audio (工頭堅)",
-            "audio_path": cam2_audio,
-            "start_frame": 0,
-            "end_frame": accumulated_offset,
-            "source_in": 0
-        })
-
-    seq_name = os.path.splitext(os.path.basename(output_path))[0]
-    xml_content = build_fcp7_xml_sequence(
-        all_part_clips=all_timeline_clips,
-        part_audio_list=part_audio_list,
-        seq_name=seq_name,
-        fps=fps,
-        width=width,
-        height=height,
-        drop_frame=drop_frame
-    )
-
-    out_dir = os.path.dirname(os.path.abspath(output_path))
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-
-    with open(output_path, "w", encoding="utf-8") as f:
-        f.write(xml_content)
-
-    total_sec = accumulated_offset / fps
-    total_min = total_sec / 60.0
-
-    print("\n" + "=" * 78)
-    print("✅  FCP7 XML Export Completed Successfully!")
-    print(f"  • Exported XML File: {output_path}")
-    print(f"  • Total Cuts       : {len(all_timeline_clips)} clips across {num_edls} EDL(s)")
-    print(f"  • Total Duration   : {int(total_sec // 60):02d}:{total_sec % 60:06.3f} ({total_sec:.2f}s / {total_min:.1f} mins)")
-    print(f"  • Timeline Frames  : {accumulated_offset} frames @ {fps} fps")
-    print("  ► Ready for import into DaVinci Resolve / Premiere Pro / Final Cut Pro!")
-    print("=" * 78 + "\n")
+                clips.append(clip)
+            for sound in sounds:
+                validate_source_range(sound, start / fps, end / fps, tolerance=1 / fps)
+                audio_in = max(0, round((start / fps + sound["offset"]) * fps))
+                span = {"start": cursor, "end": cursor + length, "in": audio_in, "out": audio_in + length}
+                spans = sound["spans"]
+                if spans and spans[-1]["out"] == audio_in and spans[-1]["end"] == cursor:
+                    spans[-1]["end"] += length
+                    spans[-1]["out"] += length
+                else:
+                    spans.append(span)
+            cursor += length
+    xml = build_fcp7_xml_sequence(clips, sounds, os.path.splitext(os.path.basename(output_path))[0], fps, width, height, drop_frame)
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as stream:
+        stream.write(xml)
+    print(f"Exported {output_path}: {len(clips)} video clips, {sum(s['channels'] for s in sounds)} audio tracks, {cursor / fps:.3f}s")
     return output_path
 
 
@@ -582,10 +458,10 @@ def main():
     parser.add_argument("--lang", default="en",
                         help="Language for the EDL validation report (default: en)")
 
-    parser.add_argument("--fps", type=float, default=float(DEFAULT_FPS), help="Sequence frame rate (default: 30)")
+    parser.add_argument("--fps", type=float, default=None, help="Sequence frame rate (default: detected from media)")
     parser.add_argument("--drop-frame", action="store_true", help="Enable drop-frame timecode (DF) for NTSC sequences (default: NDF)")
-    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH, help="Sequence width (default: 1920)")
-    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT, help="Sequence height (default: 1080)")
+    parser.add_argument("--width", type=int, default=None, help="Sequence width (default: detected from media)")
+    parser.add_argument("--height", type=int, default=None, help="Sequence height (default: detected from media)")
 
     args = parser.parse_args()
 

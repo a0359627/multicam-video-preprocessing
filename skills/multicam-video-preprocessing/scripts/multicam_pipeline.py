@@ -25,6 +25,7 @@ CLI Examples:
 
 import argparse
 import concurrent.futures
+import math
 import os
 import sys
 import tempfile
@@ -35,6 +36,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from modules.time_utils import parse_time_to_seconds, format_seconds
 from modules.audio_sync import sync_all_targets, compute_common_overlap_range, SCORE_LOW
 from modules.audio_normalizer import normalize_all_audio_tracks
+from modules.master_audio import align_master_audio, probe_reference_video
 from modules.video_composer import (
     compute_grid_spec, compose_multicam_video, cut_single_clip
 )
@@ -53,6 +55,7 @@ def main():
     parser.add_argument("--targets", "--target", nargs="+", default=None, help="One or more target camera video paths or Google Drive links (CAM2, CAM3... up to CAM6)")
     parser.add_argument("--gdrive-folder", dest="gdrive_folder", default=None, help="Google Drive Folder URL or Folder ID containing 2-6 camera videos (auto-sorted as CAM1..CAMn via ADC)")
     parser.add_argument("--project", default=None, help="Google Cloud Project ID for ADC Google Drive API quota (optional)")
+    parser.add_argument("--master-audio", default=None, help="Optional local master recording (WAV, MKV, etc.); align to the reference by audio, and require full edit-range coverage")
 
     # Manual Trim Range (Optional)
     parser.add_argument("--ref-start", default=None, help="Reference camera manual start time (HH:MM:SS.mmm or seconds)")
@@ -88,6 +91,10 @@ def main():
     parser.add_argument("--strict-sync", action="store_true", help="Abort and exit non-zero if any camera audio alignment confidence is low (score < 7.0)")
 
     args = parser.parse_args()
+    if args.sr <= 0 or args.workers <= 0:
+        parser.error("--sr and --workers must be positive.")
+    if args.sample_dur is not None and (not math.isfinite(args.sample_dur) or args.sample_dur <= 0):
+        parser.error("--sample-dur must be a finite positive number.")
 
     # Resolve Google Drive Folder or File Links via ADC if provided
     from modules.gcp_client import is_gdrive_source, resolve_multicam_gdrive_inputs
@@ -113,11 +120,23 @@ def main():
         parser.error("Either --gdrive-folder <FOLDER_URL_OR_ID> or both --ref and --targets must be specified.")
 
     # Validate input files
+    args.ref = os.path.abspath(os.path.expanduser(args.ref))
+    args.targets = [os.path.abspath(os.path.expanduser(path)) for path in args.targets]
     all_inputs = [args.ref] + list(args.targets)
     for p in all_inputs:
-        if not os.path.exists(p):
+        if not os.path.isfile(p):
             print(f"[Error] File not found: {p}", file=sys.stderr)
             sys.exit(1)
+    if len({os.path.realpath(path) for path in all_inputs}) != len(all_inputs):
+        parser.error("Each camera must reference a different source file.")
+    if args.master_audio is not None:
+        args.master_audio = os.path.abspath(os.path.expanduser(args.master_audio))
+        if not os.path.isfile(args.master_audio):
+            parser.error(f"Master audio file not found: {args.master_audio}")
+    try:
+        video_format = probe_reference_video(args.ref)
+    except ValueError as error:
+        parser.error(str(error))
 
     total_cams = len(all_inputs)
     if total_cams > 6:
@@ -155,6 +174,16 @@ def main():
     has_manual_trim = (args.ref_start is not None or args.ref_end is not None)
     t_ref_start = parse_time_to_seconds(args.ref_start) if args.ref_start is not None else overlap_start
     t_ref_end = parse_time_to_seconds(args.ref_end) if args.ref_end is not None else overlap_end
+    if (
+        not all(math.isfinite(value) for value in (t_ref_start, t_ref_end))
+        or t_ref_end <= t_ref_start
+        or t_ref_start < overlap_start - 1e-6
+        or t_ref_end > overlap_end + 1e-6
+    ):
+        parser.error(
+            f"Requested reference range {t_ref_start}..{t_ref_end}s must be nonempty "
+            f"and within the shared camera overlap {overlap_start}..{overlap_end}s."
+        )
 
     trim_info = {
         "start": t_ref_start,
@@ -204,6 +233,21 @@ def main():
             )
             sys.exit(1)
 
+    try:
+        master_meta = align_master_audio(
+            args.master_audio, ref_info, t_ref_start, t_ref_end,
+            sr=args.sr, sample_dur=args.sample_dur, full_scan=args.full_scan,
+            refine_subframe=not args.no_subframe_refine,
+        )
+    except (ValueError, RuntimeError, OSError) as error:
+        print(f"[Error] Optional master audio could not be used: {error}", file=sys.stderr)
+        sys.exit(1)
+    if master_meta:
+        print(
+            f"  ✓ Master audio aligned: {os.path.basename(master_meta['path'])} "
+            f"(Δt: {master_meta['offset_sec']:+.6f}s | Score: {master_meta['peak_z_score']:.1f})"
+        )
+
     # ---------------------------------------------------------
     # Step 2: Global EBU R128 Audio Normalization
     # ---------------------------------------------------------
@@ -234,28 +278,24 @@ def main():
         json_path = args.export_json or (os.path.join(args.output_dir, "multicam_sync.json") if args.output_dir else None)
         csv_path = args.export_csv or (os.path.join(args.output_dir, "multicam_sync.csv") if args.output_dir else None)
 
-        if json_path:
-            export_sync_json(json_path, ref_info, target_results, trim_info=trim_info)
-            print(f"  📄 Alignment metadata exported to JSON: {json_path}")
-
-        if csv_path:
-            export_sync_csv(csv_path, ref_info, target_results, trim_info=trim_info)
-            print(f"  📄 Alignment table exported to CSV: {csv_path}")
-
         export_tasks = []
+        input_names = [os.path.normcase(os.path.basename(path)) for path in all_inputs]
+        duplicate_names = {name for name in input_names if input_names.count(name) > 1}
+        def default_output(source_name, camera_id):
+            base, ext = os.path.splitext(source_name)
+            prefix = f"{camera_id}_" if os.path.normcase(source_name) in duplicate_names else ""
+            return os.path.join(args.output_dir or ".", f"{prefix}{base}{args.suffix}{ext}")
+
         if args.ref_output:
             ref_out = args.ref_output
-        elif args.output_dir:
-            base, ext = os.path.splitext(ref_info["basename"])
-            ref_out = os.path.join(args.output_dir, f"{base}{args.suffix}{ext}")
         else:
-            base, ext = os.path.splitext(ref_info["basename"])
-            ref_out = f"{base}{args.suffix}{ext}"
+            ref_out = default_output(ref_info["basename"], "CAM1")
+        ref_info["synced_path"] = os.path.abspath(ref_out)
 
         export_tasks.append({
             "video": args.ref,
             "audio": audio_map.get(args.ref),
-            "output": ref_out,
+            "output": ref_info["synced_path"],
             "start": t_ref_start,
             "end": t_ref_end,
             "name": ref_info["basename"]
@@ -267,21 +307,27 @@ def main():
 
             if args.target_outputs and idx < len(args.target_outputs):
                 tgt_out = args.target_outputs[idx]
-            elif args.output_dir:
-                base, ext = os.path.splitext(r["target_basename"])
-                tgt_out = os.path.join(args.output_dir, f"{base}{args.suffix}{ext}")
             else:
-                base, ext = os.path.splitext(r["target_basename"])
-                tgt_out = f"{base}{args.suffix}{ext}"
+                tgt_out = default_output(r["target_basename"], f"CAM{idx + 2}")
+            r["synced_path"] = os.path.abspath(tgt_out)
 
             export_tasks.append({
                 "video": r["target_video"],
                 "audio": audio_map.get(r["target_video"]),
-                "output": tgt_out,
+                "output": r["synced_path"],
                 "start": t_start,
                 "end": t_end,
                 "name": r["target_basename"]
             })
+
+        outputs = [os.path.normcase(os.path.realpath(task["output"])) for task in export_tasks]
+        protected_inputs = {os.path.normcase(os.path.realpath(path)) for path in all_inputs}
+        if args.master_audio:
+            protected_inputs.add(os.path.normcase(os.path.realpath(args.master_audio)))
+        if len(set(outputs)) != len(outputs) or protected_inputs.intersection(outputs):
+            parser.error("Camera output paths must be distinct and must not overwrite any input recording.")
+        for task in export_tasks:
+            os.makedirs(os.path.dirname(task["output"]), exist_ok=True)
 
         mode_str = "Lossless Stream Copy (-c copy)" if args.stream_copy else f"Frame-Accurate Re-encode ({args.encoder})"
         print(f"\n  ► Exporting full-length synchronized camera masters ({total_cams} CAMs) in parallel [{mode_str}] ...")
@@ -289,15 +335,16 @@ def main():
 
         def _export_single_task(stask):
             t_s_0 = time.time()
-            if os.path.exists(stask["output"]) and os.path.getsize(stask["output"]) > 1000000:
-                print(f"    ✓ [Cache hit] Synchronized master already exists: {os.path.basename(stask['output'])}")
-                return stask["name"], os.path.basename(stask["output"]), 0.0
+            # File existence cannot prove the source, offset or normalization match.
+            # Re-export instead of reusing stale video/audio from a previous job.
             cut_single_clip(
                 stask["video"], stask["output"], stask["start"], stask["end"],
                 norm_audio_path=stask["audio"], copy_codec=args.stream_copy,
                 video_bitrate=args.video_bitrate, audio_bitrate=args.audio_bitrate,
                 encoder=args.encoder
             )
+            if not os.path.isfile(stask["output"]) or os.path.getsize(stask["output"]) == 0:
+                raise RuntimeError(f"Synchronized master is missing or empty: {stask['output']}")
             return stask["name"], os.path.basename(stask["output"]), time.time() - t_s_0
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(export_tasks), args.workers)) as executor:
@@ -320,6 +367,8 @@ def main():
             t_comp = compose_multicam_video(
                 synced_video_paths, merged_video_path,
                 video_bitrate=args.video_bitrate, audio_bitrate=args.audio_bitrate,
+                master_audio_path=master_meta["path"] if master_meta else None,
+                master_audio_offset_sec=t_ref_start - master_meta["offset_sec"] if master_meta else 0.0,
                 encoder=args.encoder
             )
             print(f"    ✓ Composed {os.path.basename(merged_video_path)} in {t_comp:.1f}s")
@@ -333,6 +382,16 @@ def main():
         else:
             print(f"\n[Step 4/4] 🔲 Multi-in-One composition: Skipped (flag --merge not specified)")
 
+        if json_path:
+            export_sync_json(
+                json_path, ref_info, target_results, trim_info=trim_info,
+                master_audio=master_meta, video_format=video_format,
+            )
+            print(f"  📄 Alignment metadata exported to JSON: {json_path}")
+        if csv_path:
+            export_sync_csv(csv_path, ref_info, target_results, trim_info=trim_info)
+            print(f"  📄 Alignment table exported to CSV: {csv_path}")
+
         print("\n" + "=" * 78)
         print("✅  Multi-Camera Preprocessing Completed Successfully!")
         print("=" * 78 + "\n")
@@ -345,7 +404,10 @@ def main():
     csv_path = args.export_csv
 
     if json_path:
-        export_sync_json(json_path, ref_info, target_results, trim_info=None)
+        export_sync_json(
+            json_path, ref_info, target_results, trim_info=trim_info,
+            master_audio=master_meta, video_format=video_format,
+        )
         print(f"  📄 Alignment metadata exported to JSON: {json_path}")
 
     if csv_path:

@@ -5,6 +5,7 @@ Prints formatted terminal matrices and exports JSON and CSV alignment metadata.
 
 import csv
 import json
+import os
 from .time_utils import format_seconds
 
 
@@ -57,21 +58,28 @@ def print_sync_table(ref_info, target_results, trim_info=None):
     print("-" * 78)
 
 
-def export_sync_json(filepath, ref_info, target_results, trim_info=None):
+def export_sync_json(filepath, ref_info, target_results, trim_info=None,
+                     master_audio=None, video_format=None):
     """
     Export structured JSON metadata.
     """
     cameras_meta = [{
         "camera": ref_info["basename"],
+        "camera_id": "CAM1",
+        "source_path": os.path.abspath(ref_info["path"]),
+        "synced_path": ref_info.get("synced_path"),
         "is_ref": True,
         "offset_sec": 0.0,
         "confidence": 100.0,
         "duration_sec": ref_info["duration_sec"]
     }]
 
-    for r in target_results:
+    for camera_number, r in enumerate(target_results, start=2):
         cameras_meta.append({
             "camera": r["target_basename"],
+            "camera_id": f"CAM{camera_number}",
+            "source_path": os.path.abspath(r["target_video"]),
+            "synced_path": r.get("synced_path"),
             "is_ref": False,
             "offset_sec": r["offset_sec"],
             "confidence": r["confidence"],
@@ -79,14 +87,19 @@ def export_sync_json(filepath, ref_info, target_results, trim_info=None):
         })
 
     data = {
-        "ref_video": ref_info["path"],
-        "cameras": cameras_meta
+        "schema_version": 2,
+        "ref_video": os.path.abspath(ref_info["path"]),
+        "cameras": cameras_meta,
+        "master_audio": master_audio,
+        "video_format": video_format,
     }
 
     if trim_info:
         data["trim"] = {
             "ref_start": trim_info.get("start_str"),
-            "ref_end": trim_info.get("end_str")
+            "ref_end": trim_info.get("end_str"),
+            "ref_start_sec": float(trim_info["start"]),
+            "ref_end_sec": float(trim_info["end"]),
         }
 
     with open(filepath, "w", encoding="utf-8") as jf:

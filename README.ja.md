@@ -14,23 +14,33 @@
 
 ---
 
-## インストールと Google Cloud セットアップ (`setup.sh`)
+## この fork のインストールとローカル認証
 
-本プロジェクトは [Agent Plugins 1.0](https://agent-plugins.org/) に準拠し、**Google Cloud Vertex AI (ADC)** と **Cloud Storage (GCS)** 上で動作します（API キー管理不要）。
+[a0359627 の fork](https://github.com/a0359627/multicam-video-preprocessing) の `feat/gemini-3.8-test-c-workflow` ブランチを使用してください。原作者は [sylphlin](https://github.com/sylphlin/multicam-video-preprocessing) です。3 ステージ・全長動画ワークフローを維持しています。詳細は [チーム向けインストール・利用ガイド（繁体字中国語）](docs/INSTALL.zh-TW.md) を参照してください。
+
+Python >= 3.10 が必要です（3.11 または 3.12 を推奨）。FFmpeg（ffprobe を含む）、Git、Google Cloud CLI は別途インストールします。以下は macOS 用の例です。Windows のインストールと編集ソフトへの読み込みは未検証です。
 
 ```bash
-# 1. グローバル Antigravity Plugin としてクローン
-git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
-
-# 2. 依存パッケージのインストールと ADC 認証
-brew install ffmpeg
-pip install numpy google-genai google-cloud-storage requests
+git clone --branch feat/gemini-3.8-test-c-workflow --single-branch https://github.com/a0359627/multicam-video-preprocessing.git
+cd multicam-video-preprocessing
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 gcloud auth application-default login
-
-# 3. setup.sh を実行して GCS バケット、2 階層ライフサイクル（raw: 2 日、成果物: 15 日）、IAM、.env を構成
-chmod +x setup.sh
-./setup.sh --project YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project panmedia-internal-ge
+export GOOGLE_CLOUD_PROJECT=panmedia-internal-ge
+export GOOGLE_CLOUD_LOCATION=global
+export GCS_BUCKET=panmedia-test-488409-agent-staging
 ```
+
+権限を付与済みのメンバーは既存の project と bucket を利用します。**新しい PC の準備で `setup.sh` を実行しないでください。** クラウド資源、IAM、ライフサイクルを作成・変更するため、別環境を明示的に構築する管理者専用です。各自のアカウントで認証し、他人の ADC、token、`.env` をコピーしないでください。plugin として使う場合も、同じ fork とブランチを plugin ディレクトリに clone し、そこで依存関係の導入と認証を行います。
+
+## 外部マスター音声は任意、アップロードは自動分離
+
+- Stage 1 に `--master-audio /path/to/OBS.mkv` または WAV 録音を指定できます。音声から基準カメラとのずれを計測し、`multicam_sync.json` に保存します。信頼度が低い場合や必要区間をカバーできない場合は停止します。固定のオフセット、個人のパス、フレームレート、解像度は使いません。
+- **OBS がなくても XML と MP4 を出力できます。** `--master-audio` を省略すると同期済みカメラ音声を使用します。カメラ 2 台ともステレオなら XML は 4 音声トラック、ステレオマスターありでは 6 トラック（マスターを有効、カメラ音声は無効で保持）です。モノラル素材は実際のチャンネル数を保持します。MP4 は同期済みマスターを優先し、なければ各音声を `1/N` の比率で連続ミックスします。XML には同じゲインを保持し、編集者が調整できます。音声同期には各素材が共通の音を記録している必要があります。
+- 各ジョブは `raw/<ジョブ固有ID>/<ファイル名>` にアップロードします。同じ実行内のリトライは再利用し、新しい実行では新たにアップロードします。ローカルのファイル名変更は不要です。`--cleanup-gcs` はそのジョブがアップロードしたオブジェクトだけを削除し、直接渡した `gs://` 入力は削除しません。保存期間は従来どおり `raw/` 2 日、成果物 15 日です。
+- 素材ごとに別のローカル出力ディレクトリを使います。XML 読み込み後にメディアのリンクと冒頭・中間・末尾の同期を確認してください。書き出し成功だけでは編集品質の承認にはなりません。
 
 ### ディレクトリ構造（Agent Plugins 1.0 準拠）
 - **SSOT 実体ディレクトリ**：`skills/multicam-video-preprocessing/`（`SKILL.md`、`scripts/`、`assets/` を格納）を単一の信頼できる情報源とし、ルートの `scripts` と `assets` は POSIX シンボリックリンクとして構成されています。
@@ -129,11 +139,11 @@ flowchart TD
 
 ---
 
-## GCS 2 階層ライフサイクルポリシー (`gs://multicam-video-${PROJECT_ID}`)
+## GCS 2 階層ライフサイクルポリシー (`gs://<GCS_BUCKET>`)
 
 | GCS パス接頭辞 (`matchesPrefix`) | 保存対象 | 保持期間 (`age`) | クリーンアップ動作 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 一時グリッド動画 (`multicam_merged_full.mp4`) | **2 日間 (`age: 2`)** | SHA-256 キャッシュ再利用のため 2 日間保持し、自動削除します。 |
+| **`raw/`** | 一時グリッド動画 (`multicam_merged_full.mp4`) | **2 日間 (`age: 2`)** | ジョブごとに分離し、2 日後に自動削除します。ジョブ間のキャッシュ再利用はしません。 |
 | **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV タイムライン、レンダリング動画、検証レポート | **15 日間 (`age: 15`)** | チーム確認用に 15 日間保持した後、自動削除します。 |
 
 ---

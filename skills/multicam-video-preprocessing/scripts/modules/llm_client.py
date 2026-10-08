@@ -14,7 +14,7 @@ try:
     from .gcp_client import (
         resolve_gcp_config,
         upload_file_to_gcs_with_cache,
-        delete_gcs_blob,
+        GcsStagingJob,
         guess_mime_type,
     )
 except ImportError:
@@ -22,14 +22,14 @@ except ImportError:
         from modules.gcp_client import (
             resolve_gcp_config,
             upload_file_to_gcs_with_cache,
-            delete_gcs_blob,
+            GcsStagingJob,
             guess_mime_type,
         )
     except ImportError:
         from scripts.modules.gcp_client import (
             resolve_gcp_config,
             upload_file_to_gcs_with_cache,
-            delete_gcs_blob,
+            GcsStagingJob,
             guess_mime_type,
         )
 
@@ -78,8 +78,10 @@ def call_vertex_generate_content(
     """
     Call Google Cloud Vertex AI Gemini API using Application Default Credentials (ADC).
     All media files (video/audio) are passed via GCS URIs (`gs://...`).
-    If a local `audio_path` is supplied without `gcs_uri`, it is staged to `gs://<bucket>/raw/audio_chunks/`
-    and automatically cleaned up after inference if `cleanup_ephemeral_audio=True`.
+    If a local `audio_path` is supplied without `gcs_uri`, it is staged to
+    `gs://<bucket>/raw/<job_uuid>/audio_chunks/` and cleaned up by its exact
+    uploaded generation if `cleanup_ephemeral_audio=True`. Supplied GCS URIs
+    are never adopted for cleanup.
     """
     from google.genai import types
 
@@ -102,38 +104,37 @@ def call_vertex_generate_content(
 
     client = get_vertex_client(project=resolved_project, location=resolved_location)
 
-    staged_ephemeral_uri = None
+    staging_job = GcsStagingJob()
     effective_gcs_uri = gcs_uri
 
-    # Stage local audio slice to GCS if audio_path is provided
-    if not effective_gcs_uri and audio_path and os.path.isfile(audio_path):
-        if not resolved_bucket:
-            raise ValueError(
-                "Missing GCS Bucket for staging audio to Vertex AI. "
-                "Please run './deploy.sh', pass --gcs-bucket, or set GCS_BUCKET in .env."
-            )
-        effective_gcs_uri = upload_file_to_gcs_with_cache(
-            local_path=audio_path,
-            bucket_name=resolved_bucket,
-            gcs_prefix="raw/audio_chunks",
-            project=resolved_project,
-            region=resolved_region,
-        )
-        if cleanup_ephemeral_audio:
-            staged_ephemeral_uri = effective_gcs_uri
-
-    contents = []
-    if effective_gcs_uri:
-        mime = guess_mime_type(effective_gcs_uri)
-        contents.append(types.Part.from_uri(file_uri=effective_gcs_uri, mime_type=mime))
-    contents.append(prompt)
-
-    config_params = {"temperature": temperature, "max_output_tokens": max_tokens}
-    if thinking_budget is not None and ("3.7" in model or "3.8" in model):
-        config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
-    config = types.GenerateContentConfig(**config_params)
-
     try:
+        # Stage local audio slice to GCS if audio_path is provided
+        if not effective_gcs_uri and audio_path and os.path.isfile(audio_path):
+            if not resolved_bucket:
+                raise ValueError(
+                    "Missing GCS Bucket for staging audio to Vertex AI. "
+                    "Please run './deploy.sh', pass --gcs-bucket, or set GCS_BUCKET in .env."
+                )
+            effective_gcs_uri = upload_file_to_gcs_with_cache(
+                local_path=audio_path,
+                bucket_name=resolved_bucket,
+                gcs_prefix="raw/audio_chunks",
+                project=resolved_project,
+                region=resolved_region,
+                staging_job=staging_job,
+            )
+
+        contents = []
+        if effective_gcs_uri:
+            mime = guess_mime_type(effective_gcs_uri)
+            contents.append(types.Part.from_uri(file_uri=effective_gcs_uri, mime_type=mime))
+        contents.append(prompt)
+
+        config_params = {"temperature": temperature, "max_output_tokens": max_tokens}
+        if thinking_budget is not None and ("3.7" in model or "3.8" in model):
+            config_params["thinking_config"] = types.ThinkingConfig(thinking_budget=thinking_budget)
+        config = types.GenerateContentConfig(**config_params)
+
         for attempt in range(max_retries):
             try:
                 resp = client.models.generate_content(
@@ -159,8 +160,8 @@ def call_vertex_generate_content(
                     f"Vertex AI API call failed (Project: '{resolved_project}', Location: '{resolved_location}'): {e}"
                 )
     finally:
-        if staged_ephemeral_uri:
-            delete_gcs_blob(staged_ephemeral_uri, project=resolved_project)
+        if cleanup_ephemeral_audio:
+            staging_job.cleanup(project=resolved_project)
 
 
 def call_llm(

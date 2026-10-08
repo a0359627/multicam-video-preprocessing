@@ -2,6 +2,16 @@
 
 本目錄記錄 2026-09-30 在實際商業規格雙機 4K 訪談（沈伯洋 × 工頭堅《在台北住了四十年之後，我們算不算台北人？》）中，測試與演進多機 AI 剪輯管線的完整實驗記錄與評測代碼。
 
+## 歷史資料範圍與目前入口（2026-10-08）
+
+本目錄是 2026-09-30 個案的歷史基準。下方人物、4K／29.97 fps、音軌與 `18.268` 秒偏移都只描述該次實驗，不能套用於其他素材，也不表示新版已完成 DaVinci 或同事電腦驗收。
+
+新素材與新電腦請依 [同事安裝與使用指南](../../../../../docs/INSTALL.zh-TW.md)，使用正式三階段腳本。可在 Stage 1 指定 `--master-audio` 自動量測母帶偏移；沒有 OBS 時沿用已同步機位音訊，仍可輸出 XML 與 MP4。
+
+- `export_c_with_master_audio.py` 自本次修正起是相容入口，委派給 [正式 XML 匯出器](../../export_fcp7_xml.py)。需傳入 `--dir OUTPUT_DIR --strict-edl --lang zh-TW`，讀取該目錄的 EDL／同步資料；不再使用個案固定路徑或偏移。原版本保留於 Git commit `39bc03b`。
+- `run_production_cut.py` 雖名為 production，仍是歷史個案執行器，內含維護者電腦、外接碟、素材及提示詞的固定路徑。**不要用它安裝、處理新素材或作為通用排程入口。** `run_path_b_gemini_38.py`、V2 匯出器及下載輔助程式同樣保留作歷史比較。
+- 通用 Test C 提示詞為 `assets/prompt_c_portable.md`。舊 `assets/prompt_c_natural_rhythm.md` 包含本集人物與逐字稿，僅作個案參考。
+
 ---
 
 ## 1. 測試資料集規格
@@ -50,10 +60,10 @@
 ## 4. 本目錄腳本清單
 
 - `run_path_b_gemini_38.py`：Gemini 3.8 Flash 平行管線執行腳本（含 2 Mbps Compact Grid 壓縮）。
-- `export_c_with_master_audio.py`：測試 C 專屬 FCP7 XML 導出腳本（支援 6 軌音訊與時間線重置）。
+- `export_c_with_master_audio.py`：目前為正式 XML 匯出器的相容入口；原測試 C 專屬實作見 `39bc03b`。
 - `export_v2_with_master_audio.py`：V2 演算法硬切實驗對照腳本。
 - `compare_cuts.py`：Path A 與 Path B / C 之切鏡時長與統計指標對比工具。
-- `run_production_cut.py`：端到端完整管線排程與日誌記錄器。
+- `run_production_cut.py`：含固定個案路徑的歷史端到端排程與日誌記錄器，不供新素材或新電腦使用。
 - `edl_gemini_3.8_c_clean.csv`：測試 C 經清洗後的 100 鏡精準 EDL 決策表。
 - `edl_gemini_3.8_c_report.md`：測試 C 之 Vertex AI 推論指標與語意驗證報告。
 - `download_footage.py` / `download_b_cam.py` / `monitor_downloads.py`：大檔母帶下載與監控輔助工具。

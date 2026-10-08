@@ -6,11 +6,11 @@ for zero-split full-length multicam video editing (>1 hour in a single pass).
 
 Features:
   - 100% Vertex AI (ADC) & GCS Architecture: Uses Application Default Credentials
-    and Google Cloud Storage (`gs://<bucket>/raw/`) with SHA-256 hash caching and
+    and Google Cloud Storage (`gs://<bucket>/raw/<job_uuid>/`) with job-scoped SHA-256 caching and
     2-day GCS Bucket Lifecycle auto-cleanup (plus optional `--cleanup-gcs`).
   - Agentic Video Understanding (Default): Uses goal-directed sparse temporal sampling,
     reducing token usage by 99.7% (~3k tokens for 1hr video) and eliminating split boundaries.
-  - Broadcast-Grade EDL Prompt: Loads assets/edl_interview_template.md with zero-tolerance
+  - Broadcast-Grade EDL Prompt: Loads assets/prompt_c_portable.md with zero-tolerance
     pre-roll / countdown elimination and asymmetric safety margin.
   - Deterministic EDL Semantic Validation: Built-in 8-rule structural validation (`--strict-edl`).
 """
@@ -31,7 +31,7 @@ try:
         upload_file_to_gcs_with_cache,
         is_gdrive_source,
         transfer_gdrive_to_gcs_with_cache,
-        delete_gcs_blob,
+        GcsStagingJob,
         guess_mime_type,
     )
     from modules.progress import LiveTicker
@@ -47,7 +47,7 @@ except ImportError:
         upload_file_to_gcs_with_cache,
         is_gdrive_source,
         transfer_gdrive_to_gcs_with_cache,
-        delete_gcs_blob,
+        GcsStagingJob,
         guess_mime_type,
     )
     from scripts.modules.progress import LiveTicker
@@ -59,11 +59,11 @@ except ImportError:
 
 
 DEFAULT_PROMPT_TEMPLATE_PATHS = [
-    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "edl_interview_template.md"),
-    os.path.expanduser("~/.gemini/config/plugins/multicam-video-preprocessing/skills/multicam-video-preprocessing/assets/edl_interview_template.md"),
-    os.path.expanduser("~/.codex/plugins/multicam-video-preprocessing/skills/multicam-video-preprocessing/assets/edl_interview_template.md"),
-    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "edl_interview_template.md"),
-    os.path.join(os.getcwd(), "assets", "edl_interview_template.md"),
+    os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "assets", "prompt_c_portable.md"),
+    os.path.expanduser("~/.gemini/config/plugins/multicam-video-preprocessing/skills/multicam-video-preprocessing/assets/prompt_c_portable.md"),
+    os.path.expanduser("~/.codex/plugins/multicam-video-preprocessing/skills/multicam-video-preprocessing/assets/prompt_c_portable.md"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "prompt_c_portable.md"),
+    os.path.join(os.getcwd(), "assets", "prompt_c_portable.md"),
 ]
 
 
@@ -270,7 +270,7 @@ def main():
     parser.add_argument("--report", default=None,
                         help="Custom destination path for analysis report markdown (optional)")
     parser.add_argument("-t", "--template", default=None,
-                        help="Custom prompt template file path (defaults to assets/edl_interview_template.md)")
+                        help="Custom prompt template file path (defaults to assets/prompt_c_portable.md)")
     parser.add_argument("--model", default="gemini-3.8-flash",
                         help="Vertex AI Gemini model name (default: gemini-3.8-flash)")
     parser.add_argument("--processing", choices=["agentic", "standard"], default="agentic",
@@ -286,7 +286,7 @@ def main():
     parser.add_argument("--force-upload", action="store_true",
                         help="Force re-upload of video file to GCS even if SHA-256 cache matches")
     parser.add_argument("--cleanup-gcs", action="store_true",
-                        help="Immediately delete the staged video from GCS after EDL generation completes (otherwise governed by 2-day GCS Lifecycle)")
+                        help="Delete only this job's uploaded video generation after processing; supplied gs:// inputs are preserved (otherwise 2-day GCS lifecycle)")
     parser.add_argument("--strict-edl", action="store_true",
                         help="EDL 驗證出現 ERROR 時中斷執行（預設僅警告並繼續）")
     parser.add_argument("--lang", default="en",
@@ -335,43 +335,46 @@ def main():
     print(f"  • Target Report  : {report_path}")
     print("-" * 78)
 
-    if is_gcs_uri:
-        video_uri = args.video
-    elif is_gdrive:
-        video_uri, _ = transfer_gdrive_to_gcs_with_cache(
-            args.video,
-            bucket_name=gcp_cfg["bucket"],
-            gcs_prefix="raw",
-            local_cache_dir=os.path.join(out_dir, "gdrive_inputs"),
-            project=gcp_cfg["project"],
-            region=gcp_cfg["region"],
-            force=args.force_upload,
-        )
-    else:
-        video_uri = upload_file_to_gcs_with_cache(
-            args.video,
-            bucket_name=gcp_cfg["bucket"],
-            gcs_prefix="raw",
-            project=gcp_cfg["project"],
-            region=gcp_cfg["region"],
-            force_upload=args.force_upload,
-        )
-    genai_client = get_vertex_client(
-        project=gcp_cfg["project"],
-        location=gcp_cfg["location"],
-    )
-
-    prompt_text = load_prompt_template(args.template)
-
-    # Full-length video instruction: ensure model knows timecode format covers >1hr without slicing
-    prompt_text += (
-        "\n\n---\n"
-        "### 額外時間碼與全片長度特別指示：\n"
-        "1. 本影片為完整全集錄影，時間碼格式請支援 `HH:MM:SS.000` 或 `MM:SS.000`（如 `01:02:15.000` 或 `62:15.000` 皆可）。\n"
-        "2. 請由開頭 Global_Start_Time 一路分析覆蓋至全片結束 Global_End_Time，全片無切分斷句。\n"
-    )
-
+    staging_job = GcsStagingJob()
     try:
+        if is_gcs_uri:
+            video_uri = args.video
+        elif is_gdrive:
+            video_uri, _ = transfer_gdrive_to_gcs_with_cache(
+                args.video,
+                bucket_name=gcp_cfg["bucket"],
+                gcs_prefix="raw",
+                local_cache_dir=os.path.join(out_dir, "gdrive_inputs"),
+                project=gcp_cfg["project"],
+                region=gcp_cfg["region"],
+                force_upload=args.force_upload,
+                staging_job=staging_job,
+            )
+        else:
+            video_uri = upload_file_to_gcs_with_cache(
+                args.video,
+                bucket_name=gcp_cfg["bucket"],
+                gcs_prefix="raw",
+                project=gcp_cfg["project"],
+                region=gcp_cfg["region"],
+                force_upload=args.force_upload,
+                staging_job=staging_job,
+            )
+        genai_client = get_vertex_client(
+            project=gcp_cfg["project"],
+            location=gcp_cfg["location"],
+        )
+
+        prompt_text = load_prompt_template(args.template)
+
+        # Full-length video instruction: ensure model knows timecode format covers >1hr without slicing
+        prompt_text += (
+            "\n\n---\n"
+            "### 額外時間碼與全片長度特別指示：\n"
+            "1. 本影片為完整全集錄影，時間碼格式請支援 `HH:MM:SS.000` 或 `MM:SS.000`（如 `01:02:15.000` 或 `62:15.000` 皆可）。\n"
+            "2. 請由開頭 Global_Start_Time 一路分析覆蓋至全片結束 Global_End_Time，全片無切分斷句。\n"
+        )
+
         if args.processing == "agentic":
             try:
                 response_text, usage_info, duration = call_agentic_video_edl(
@@ -456,8 +459,8 @@ def main():
             sys.exit(1)
 
     finally:
-        if args.cleanup_gcs and video_uri:
-            delete_gcs_blob(video_uri, project=gcp_cfg.get("project"))
+        if args.cleanup_gcs:
+            staging_job.cleanup(project=gcp_cfg.get("project"))
 
     print("\n" + "=" * 78)
     print("✅  AI EDL Generation Completed Successfully!")

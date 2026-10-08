@@ -9,15 +9,20 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 1. **Strict Toolset Execution Only (No Ad-Hoc Scripts)**:
    - Execute all video preprocessing, EDL rough-cutting, XML exporting, and rendering exclusively via the official scripts in `scripts/`. Writing temporary Python scripts or custom audio/video synchronization logic is **STRICTLY FORBIDDEN**.
 2. **Mandatory 3-Stage Gated Workflow (Zero-Split Agentic Architecture)**:
-   - Follow the 3-Stage Gated Runbook defined in [SKILL.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/SKILL.md):
+   - Follow the 3-Stage Gated Runbook defined in [SKILL.md](skills/multicam-video-preprocessing/SKILL.md):
      - **Stage 1**: `scripts/multicam_pipeline.py --normalize --merge` (MFCC `<0.125ms` sync + EBU R128 `-14 LUFS` + synced masters + `multicam_merged_full.mp4`).
      - **Stage 2**: `scripts/generate_edl.py` (Vertex AI Gemini 3.8 Flash Agentic Video `processing="agentic"` on full-length grid video + 8-check deterministic EDL semantic validation).
      - **Stage 3A (Primary 90%)**: `scripts/export_fcp7_xml.py` (`final_cut_full.xml` for DaVinci Resolve / Premiere Pro / Final Cut Pro).
      - **Stage 3B (Secondary 10%)**: `scripts/edl_to_video.py` (`final_cut_full.mp4` single-pass hardware render).
 3. **Fail-Fast & Exit Gate Verification**:
-   - If any script exits with a non-zero status (e.g., missing ADC credentials, 403/401 GCS/Vertex AI permission error, or `--strict-edl` validation failure), stop immediately, report the exact error, and instruct the user to run `./setup.sh --project YOUR_PROJECT_ID` or `gcloud auth application-default login`.
+   - If any script exits with a non-zero status (e.g., missing ADC credentials, 403/401 GCS/Vertex AI permission error, or `--strict-edl` validation failure), stop immediately, report the exact error, and resolve the relevant local dependency or ADC issue. Authorized team members use `gcloud auth application-default login` and `gcloud auth application-default set-quota-project panmedia-internal-ge`; never prescribe `setup.sh` as a workstation login step because it changes cloud resources. See [team installation guide](docs/INSTALL.zh-TW.md).
    - Never declare completion until all required stage output files exist on disk and are non-empty (`> 0 bytes`).
-4. **Dynamic Language Mirroring**:
+4. **Portable Audio and Media Invariants**:
+   - `--master-audio` is optional in Stage 1. Align external WAV/OBS audio acoustically to the reference camera and persist measured offsets/coverage in `multicam_sync.json`; low-confidence master alignment or insufficient coverage must stop execution.
+   - With no master audio, synchronized camera audio must support both XML and MP4 delivery. Use a continuous camera-audio mix with equal `1/N` gains; retain independently editable camera tracks in XML. Two stereo cameras produce four camera audio tracks without a master and six with a stereo master (master enabled, camera audio retained but disabled). Mono sources retain their actual channel count.
+   - Never reuse historical personal paths, fixed offsets, frame rates, resolutions or speaker identities for new footage. Default EDL instructions are the portable Test C rules in `assets/prompt_c_portable.md`; `benchmarks/interview_test_c/` and `prompt_c_natural_rhythm.md` are historical case material.
+   - Use a new local output directory for each recording and `--strict-sync` for the gated workflow. Record actual media-linked NLE and audio review separately from successful file generation.
+5. **Dynamic Language Mirroring**:
    - Detect and respond in the user's prompt language (Traditional Chinese `zh-TW` by default when prompted in Traditional Chinese, English when prompted in English, Japanese when prompted in Japanese, etc.) and pass the corresponding `--lang` parameter to CLI scripts.
 
 ---
@@ -32,12 +37,12 @@ When modifying code, prompts, infrastructure scripts, or documentation in this r
 - **Rule**: Always edit files under `skills/multicam-video-preprocessing/scripts/` and `skills/multicam-video-preprocessing/assets/`. Never replace root symlinks with duplicate physical directories.
 
 ### 2. 100% Google Cloud Vertex AI (ADC) + GCS Architecture
-- **Zero API Key Policy**: All Gemini model invocations in [llm_client.py](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/scripts/modules/llm_client.py) and [gcp_client.py](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/scripts/modules/gcp_client.py) MUST use `genai.Client(vertexai=True, project=..., location=...)` authenticated via Application Default Credentials (ADC), defaulting to `GOOGLE_CLOUD_LOCATION=global`.
+- **Zero API Key Policy**: All Gemini model invocations in [llm_client.py](skills/multicam-video-preprocessing/scripts/modules/llm_client.py) and [gcp_client.py](skills/multicam-video-preprocessing/scripts/modules/gcp_client.py) MUST use `genai.Client(vertexai=True, project=..., location=...)` authenticated via Application Default Credentials (ADC), defaulting to `GOOGLE_CLOUD_LOCATION=global`.
 - **No AI Studio Dependencies**: Do NOT re-introduce `GEMINI_API_KEY`, AI Studio File API (`generativelanguage.googleapis.com`), `--backend studio`, or `--fallback-studio`.
 - **GCS Infrastructure & Two-Tier Lifecycle (`setup.sh`)**:
-  - All cloud environment setup must be consolidated in [setup.sh](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/setup.sh) using 100% native `gcloud` CLI commands (`deploy.sh` is reserved for future Gemini Enterprise deployment).
+  - All cloud environment setup must be consolidated in [setup.sh](setup.sh) using 100% native `gcloud` CLI commands (`deploy.sh` is reserved for future Gemini Enterprise deployment).
   - Bucket Lifecycle auto-cleanup rules must maintain the two-tier retention policy:
-    - **`raw/` prefix**: **2 days (`age: 2`)** for ephemeral staging videos (with local SHA-256 hash caching).
+    - **`raw/` prefix**: **2 days (`age: 2`)** for ephemeral staging videos. Uploads use `raw/<job UUID>/<filename>` with reuse only inside that job; no cross-job cache reuse. Cleanup must only delete objects uploaded by that job, never a directly supplied `gs://` input.
     - **`output/`, `deliverables/`, `multicam_assets/` prefixes**: **15 days (`age: 15`)** for deliverables retention.
 
 ### 3. Deterministic Validation & Unit Testing Gate
@@ -46,13 +51,13 @@ When modifying code, prompts, infrastructure scripts, or documentation in this r
   python3 -m unittest discover -s tests -v
   ```
 - **Validator Invariants**:
-  - Any modification to EDL generation or parsing must preserve all 8 structural checks (`6 ERROR + 2 WARN`) in [edl_validator.py](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/scripts/modules/edl_validator.py) and ensure `generate_edl.py` writes CSV/Markdown outputs to disk *before* exiting on `--strict-edl`.
+  - Any modification to EDL generation or parsing must preserve all 8 structural checks (`6 ERROR + 2 WARN`) in [edl_validator.py](skills/multicam-video-preprocessing/scripts/modules/edl_validator.py) and ensure `generate_edl.py` writes CSV/Markdown outputs to disk *before* exiting on `--strict-edl`.
 
 ### 4. Antigravity Plugin Architecture & 5-Language Documentation Parity
-- **Plugin Structure**: Keep [plugin.json](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/plugin.json), [rules/AGENTS.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/rules/AGENTS.md), and [skills/multicam-video-preprocessing/SKILL.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/skills/multicam-video-preprocessing/SKILL.md) synchronized at all times. Do not use deprecated `.agent/workflows/` or `.agent/rules/` folders.
+- **Plugin Structure**: Keep [plugin.json](plugin.json), [rules/AGENTS.md](rules/AGENTS.md), and [skills/multicam-video-preprocessing/SKILL.md](skills/multicam-video-preprocessing/SKILL.md) synchronized at all times. Do not use deprecated `.agent/workflows/` or `.agent/rules/` folders.
 - **Multilingual README Synchronization**: Whenever CLI options, cloud setup (`setup.sh`), lifecycle rules, or workflow behaviors change, you MUST synchronously update all 5 language READMEs:
-  1. [README.zh-TW.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/README.zh-TW.md) (Traditional Chinese)
-  2. [README.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/README.md) (English)
-  3. [README.zh-CN.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/README.zh-CN.md) (Simplified Chinese)
-  4. [README.ja.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/README.ja.md) (Japanese)
-  5. [README.ko.md](file:///Users/sylph/Documents/Antigravity/multicam-video-preprocessing/README.ko.md) (Korean)
+  1. [README.zh-TW.md](README.zh-TW.md) (Traditional Chinese)
+  2. [README.md](README.md) (English)
+  3. [README.zh-CN.md](README.zh-CN.md) (Simplified Chinese)
+  4. [README.ja.md](README.ja.md) (Japanese)
+  5. [README.ko.md](README.ko.md) (Korean)

@@ -106,7 +106,7 @@ def generate_grid_filter_complex(num_inputs, custom_cw=None, custom_ch=None, dra
 def compose_multicam_video(video_paths, output_path,
                            video_bitrate="2000k", audio_bitrate="192k",
                            encoder="h264_videotoolbox",
-                           draw_labels=True):
+                           draw_labels=True, master_audio_path=None, master_audio_offset_sec=0.0):
     """
     Compose 2 to 6+ synchronized camera videos into a single multi-in-one grid video directly in Python.
     Features automatic fallback for drawtext and hardware encoding.
@@ -122,10 +122,19 @@ def compose_multicam_video(video_paths, output_path,
         c = ["ffmpeg", "-y"]
         for vp in video_paths:
             c.extend(["-i", vp])
+        if master_audio_path:
+            if master_audio_offset_sec < -0.001:
+                raise ValueError("Master audio does not cover the grid start")
+            c.extend(["-ss", str(max(0, master_audio_offset_sec)), "-i", master_audio_path])
+            audio_mapping = f"{num_inputs}:a:0"
+        else:
+            audio_inputs = "".join(f"[{i}:a:0]" for i in range(num_inputs))
+            fc += f";{audio_inputs}amix=inputs={num_inputs}:duration=shortest:dropout_transition=0:normalize=1[aout]"
+            audio_mapping = "[aout]"
         c.extend([
             "-filter_complex", fc,
             "-map", "[out]",
-            "-map", "0:a?",
+            "-map", audio_mapping,
             "-c:v", enc,
             "-b:v", video_bitrate,
             "-pix_fmt", "yuv420p",
@@ -228,4 +237,3 @@ def cut_single_clip(video_path, output_path, start_sec, end_sec,
             raise RuntimeError(f"FFmpeg video cutting failed ({os.path.basename(video_path)}): {err_msg}")
 
     return time.time() - t0
-

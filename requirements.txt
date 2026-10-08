@@ -1,0 +1,6 @@
+# Python >= 3.10; Python 3.11 or 3.12 recommended.
+# FFmpeg/ffprobe and Google Cloud CLI are installed separately.
+numpy
+google-genai
+google-cloud-storage
+requests

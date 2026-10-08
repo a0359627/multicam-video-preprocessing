@@ -14,23 +14,33 @@
 
 ---
 
-## 安装与 Google Cloud 环境配置 (`setup.sh`)
+## 安装此 fork 与本机授权
 
-本项目遵循 [Agent Plugins 1.0](https://agent-plugins.org/) 规范，完全基于 **Google Cloud Vertex AI (ADC)** 与 **Cloud Storage (GCS)** 运行，无需 API Key。
+请使用 [a0359627 的 fork](https://github.com/a0359627/multicam-video-preprocessing)，指定 `feat/gemini-3.8-test-c-workflow` 分支。原作者为 [sylphlin](https://github.com/sylphlin/multicam-video-preprocessing)，本版保留三阶段、全长视频工作流。完整步骤见 [同事安装与使用指南（繁体中文）](docs/INSTALL.zh-TW.md)。
+
+需要 Python >= 3.10，推荐 3.11 或 3.12；另行安装 FFmpeg（含 ffprobe）、Git 和 Google Cloud CLI。以下终端示例适用于 macOS；Windows 安装和剪辑软件导入尚未验证。
 
 ```bash
-# 1. 安装为全局 Antigravity Plugin
-git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
-
-# 2. 安装依赖与授权 ADC
-brew install ffmpeg
-pip install numpy google-genai google-cloud-storage requests
+git clone --branch feat/gemini-3.8-test-c-workflow --single-branch https://github.com/a0359627/multicam-video-preprocessing.git
+cd multicam-video-preprocessing
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 gcloud auth application-default login
-
-# 3. 运行 setup.sh 配置 GCS 存储桶、双层生命周期规则（raw: 2 天，交付物: 15 天）、IAM 与 .env
-chmod +x setup.sh
-./setup.sh --project YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project panmedia-internal-ge
+export GOOGLE_CLOUD_PROJECT=panmedia-internal-ge
+export GOOGLE_CLOUD_LOCATION=global
+export GCS_BUCKET=panmedia-test-488409-agent-staging
 ```
+
+已获授权的同事使用现有 project 和 bucket。**新电脑安装不要运行 `setup.sh`**：它会创建或修改云资源、IAM 和生命周期，仅供管理员明确要另建环境时使用。每人用自己的账号登录，不复制他人的 ADC、token 或 `.env`。安装为 plugin 时，也须将同一 fork、同一分支 clone 到 plugin 目录，再安装依赖和登录。
+
+## 外录母带可选，上传自动隔离
+
+- Stage 1 可加 `--master-audio /path/to/OBS.mkv` 或 WAV 录音文件，自动按声音对齐参考相机并写入 `multicam_sync.json`。对齐置信度低或母带无法覆盖所需时段时停止，不使用固定偏移、个人素材路径或固定帧率／分辨率。
+- **没有 OBS 也能输出 XML 和 MP4。** 未指定 `--master-audio` 时使用已同步的相机音频。两台相机均为立体声时，XML 保留四条相机音轨；加入立体声母带则为六条，默认启用母带、保留但禁用相机音轨。单声道素材按实际声道数保留。MP4 优先使用对齐母带，否则按每路 `1/N` 连续混合已同步的相机音频；XML 保留相应音量供剪辑师调整。声学同步需要素材中共同录到的声音。
+- 每次任务自动上传到 `raw/<任务唯一编号>/<文件名>`。同次执行内部重试复用该对象，重新启动任务则重新上传，本地无需改名。`--cleanup-gcs` 只清理本次上传的对象，不删除直接提供的 `gs://` 输入。生命周期仍为 `raw/` 2 天、交付物 15 天。
+- 每组素材使用独立的本地输出目录。XML 导入剪辑软件后，检查媒体链接及首／中／尾视听同步；成功导出不代表剪辑质量已获接受。
 
 ### 项目目录结构（Agent Plugins 1.0 标准规范）
 - **SSOT 实体目录**：`skills/multicam-video-preprocessing/`（内含 `SKILL.md`、`scripts/` 与 `assets/`），根目录 `scripts` 与 `assets` 为指向该目录的 POSIX symlinks。
@@ -129,11 +139,11 @@ flowchart TD
 
 ---
 
-## GCS 双层生命周期规则 (`gs://multicam-video-${PROJECT_ID}`)
+## GCS 双层生命周期规则 (`gs://<GCS_BUCKET>`)
 
 | GCS 路径前缀 (`matchesPrefix`) | 存储对象 | 保留天数 (`age`) | 清理机制 |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | 暂存网格视频 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 保留 2 天供 SHA-256 缓存复用，期满自动删除。 |
+| **`raw/`** | 暂存网格视频 (`multicam_merged_full.mp4`) | **2 天 (`age: 2`)** | 每次任务使用独立路径，2 天后自动清理，不跨任务复用缓存。 |
 | **`output/`**、**`deliverables/`**、**`multicam_assets/`** | XML/CSV 时间线、渲染视频与验证报告 | **15 天 (`age: 15`)** | 保留 15 天供团队审阅，期满自动清理。 |
 
 ---

@@ -14,35 +14,33 @@
 
 ---
 
-## Installation & Google Cloud Setup (`setup.sh`)
+## Install this fork and sign in
 
-This project complies with [Agent Plugins 1.0](https://agent-plugins.org/) and runs on **Google Cloud Vertex AI (ADC)** and **Cloud Storage (GCS)** with zero API key files.
+Use [a0359627's fork](https://github.com/a0359627/multicam-video-preprocessing), branch `feat/gemini-3.8-test-c-workflow`. Upstream author: [sylphlin](https://github.com/sylphlin/multicam-video-preprocessing). The full-length, three-stage workflow is retained. For the complete team handoff, see [Installation and usage (Traditional Chinese)](docs/INSTALL.zh-TW.md).
 
-### 1. Install as an Antigravity Plugin or Skill
-
-- **Global Plugin (Recommended)**:
-  ```bash
-  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/plugins/multicam-video-preprocessing
-  ```
-- **Global Skill**:
-  ```bash
-  git clone https://github.com/sylphlin/multicam-video-preprocessing.git ~/.gemini/config/skills/multicam-video-preprocessing
-  ```
-
-### 2. Install Dependencies and Provision Cloud Resources (`setup.sh`)
+Python >= 3.10 is required; 3.11 or 3.12 is recommended. Install FFmpeg (including ffprobe), Git and Google Cloud CLI separately. These shell examples target macOS; Windows installation and NLE import have not been verified.
 
 ```bash
-# 1. Install FFmpeg and Python packages
-brew install ffmpeg
-pip install numpy google-genai google-cloud-storage requests
-
-# 2. Authenticate Application Default Credentials (ADC)
+git clone --branch feat/gemini-3.8-test-c-workflow --single-branch https://github.com/a0359627/multicam-video-preprocessing.git
+cd multicam-video-preprocessing
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
 gcloud auth application-default login
-
-# 3. Provision GCS bucket, two-tier lifecycle rules (raw: 2d, deliverables: 15d), IAM, and .env
-chmod +x setup.sh
-./setup.sh --project YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project panmedia-internal-ge
+export GOOGLE_CLOUD_PROJECT=panmedia-internal-ge
+export GOOGLE_CLOUD_LOCATION=global
+export GCS_BUCKET=panmedia-test-488409-agent-staging
 ```
+
+Authorized team members use the existing project and bucket. **Do not run `setup.sh` for workstation installation:** it provisions or changes cloud resources, IAM and lifecycle rules. It is reserved for an administrator explicitly provisioning a separate environment. Credentials stay on each user's computer; never copy another person's ADC, tokens or `.env`. When installed as a plugin, clone this same fork and branch into the plugin directory, then run the dependency and sign-in steps there.
+
+## Optional external audio and independent uploads
+
+- Stage 1 accepts `--master-audio /path/to/OBS.mkv` or a WAV recording. It acoustically aligns that recording to the reference camera and stores the result in `multicam_sync.json`. Low-confidence alignment or insufficient coverage stops the job. No fixed offset, personal media path, frame rate or resolution is assumed.
+- **OBS is optional.** Without `--master-audio`, both XML and MP4 use synchronized camera audio. For two stereo cameras, XML retains four camera-audio tracks; adding a stereo master gives six, with the master enabled and camera tracks retained but disabled. Mono sources retain their actual channel count. MP4 uses the aligned master when present and a continuous equal `1/N` mix of synchronized camera audio otherwise; the XML retains matching gains that the editor can adjust. Acoustic synchronization requires sound recorded in common by the sources.
+- Each job uploads to `raw/<unique-job-id>/<filename>`. Internal retries reuse that job's object; a new invocation gets a new path and upload. Local filenames may stay unchanged. `--cleanup-gcs` only removes uploads owned by that job and never deletes a directly supplied `gs://` input. Existing lifecycle retention remains 2 days for `raw/` and 15 days for deliverables.
+- Use a separate local output directory for each recording. Review the XML in your NLE with all media linked and listen at the beginning, middle and end; successful export alone is not editorial acceptance.
 
 ### Directory Structure (Agent Plugins 1.0 Specification)
 ```text
@@ -60,13 +58,13 @@ multicam-video-preprocessing/
 │       │   ├── edl_to_video.py                           # Stage 3B: Single-pass hardware video rendering (Secondary)
 │       │   └── modules/                                  # Acoustic, video, validator, and GCP/Vertex AI modules
 │       └── assets/                                       # Canonical prompt templates (SSOT)
-│           └── edl_interview_template.md                 # Gemini multimodal interview rough-cut rules
+│           └── prompt_c_portable.md                 # Gemini multimodal interview rough-cut rules
 ├── scripts -> skills/multicam-video-preprocessing/scripts # Root POSIX symlink for CLI & test compatibility
 ├── assets -> skills/multicam-video-preprocessing/assets   # Root POSIX symlink for prompt resolution
 ├── AGENTS.md                                             # Workspace & engineering development rules (Part I & Part II)
 ├── setup.sh                                              # Native gcloud setup script (GCS, Lifecycle, IAM, .env)
 ├── .env.example                                          # Vertex AI (ADC) and GCS configuration template
-└── tests/                                                # Offline unit test suite (41 tests)
+└── tests/                                                # Offline unit test suite
 ```
 
 ---
@@ -205,11 +203,11 @@ Renders `final_cut_full.mp4` directly from the synchronized camera masters in a 
 
 ---
 
-## Two-Tier GCS Bucket Lifecycle Policy (`gs://multicam-video-${PROJECT_ID}`)
+## Two-Tier GCS Bucket Lifecycle Policy (`gs://<GCS_BUCKET>`)
 
 | GCS Prefix (`matchesPrefix`) | Stored Objects | Retention (`age`) | Cleanup Mechanism |
 | :--- | :--- | :--- | :--- |
-| **`raw/`** | Staged grid video (`multicam_merged_full.mp4`) | **2 Days (`age: 2`)** | Retains SHA-256 cached staging media for 2 days, then deletes automatically. |
+| **`raw/`** | Staged grid video (`multicam_merged_full.mp4`) | **2 Days (`age: 2`)** | Automatically removes per-job staging objects after 2 days; no cache reuse across jobs. |
 | **`output/`**, **`deliverables/`**, **`multicam_assets/`** | XML/CSV timelines, rendered videos, and reports | **15 Days (`age: 15`)** | Retains deliverables for 15 days for team review before automatic deletion. |
 
 ---

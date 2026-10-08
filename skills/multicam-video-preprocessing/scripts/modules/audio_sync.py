@@ -474,6 +474,7 @@ def sync_single_target(ref_info, target_video, tmpdir, sr=8000, max_dur=None, fu
         "target_video": target_video,
         "target_basename": target_basename,
         "duration_sec": final_duration,
+        "analyzed_audio_duration_sec": target_wav_dur,
         "offset_sec": offset_sec,
         "confidence": stats["confidence"],
         "peak_z_score": stats["peak_z_score"],
@@ -521,10 +522,17 @@ def sync_all_targets(ref_video, target_videos, sr=8000, sample_dur=None, workers
         scan_mode_str = "Full-Scan" if full_scan else "Fast-Ladder (120s -> Full)"
         refine_str = "Subframe Refinement (0.125ms)" if refine_subframe else "Hop-Level (16ms)"
         print(f"  ► Calculating MFCC cross-correlation for {len(target_videos)} target camera(s) [{scan_mode_str} | {refine_str}]...")
+        # Separate camera folders often contain the same recording filename.
+        # Keep each worker's extracted WAVs separate even when basenames match.
+        target_directories = []
+        for index in range(len(target_videos)):
+            directory = os.path.join(tmpdir, f"camera_{index + 2}")
+            os.makedirs(directory)
+            target_directories.append(directory)
         with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as executor:
             futures = {
-                executor.submit(sync_single_target, ref_info, tgt, tmpdir, sr, sample_dur, full_scan, refine_subframe): tgt
-                for tgt in target_videos
+                executor.submit(sync_single_target, ref_info, tgt, directory, sr, sample_dur, full_scan, refine_subframe): tgt
+                for tgt, directory in zip(target_videos, target_directories)
             }
             for fut in concurrent.futures.as_completed(futures):
                 res = fut.result()
@@ -573,4 +581,3 @@ def compute_common_overlap_range(ref_info, target_results):
         overlap_end = min(overlap_end, off + tgt_dur)
 
     return overlap_start, max(overlap_start, overlap_end)
-

@@ -5,6 +5,7 @@ description: >
   Executes MFCC acoustic time alignment with subframe refinement (<0.125ms), EBU R128 two-pass linear loudness normalization (-14 LUFS),
   synchronized full-length camera master exporting (frame-accurate hardware re-encoding), Multi-in-One compact grid composition (canvas <= 1920x1080, min >= 640x480/CAM),
   zero-split Gemini 3.8 Flash Agentic Video EDL generation (100% Google Cloud Vertex AI via ADC + GCS storage with 2-day lifecycle auto-cleanup),
+  Optional acoustically aligned external master audio, camera-audio fallback without OBS, job-isolated GCS staging,
   FCP7 XML timeline export with NTSC fractional fps & drop-frame support (Primary), and direct video rendering (Secondary).
   Keywords: multicam, multi-camera, dual-cam, 4-cam, 6-cam, time alignment, audio sync, loudness normalization, video preprocessing, multicam pipeline, multi-in-one, token optimization, fcp7 xml, agentic video, vertex ai, gcs, adc.
 ---
@@ -18,11 +19,13 @@ Universal end-to-end toolkit for multi-camera video production (2 to 6 Cameras),
 ## Prerequisites & Environment
 
 - **Google Antigravity IDE / Agent Framework**
-- **FFmpeg** (with `h264_videotoolbox` hardware encoding and `loudnorm` filter support)
-- **Python 3.8+** with `numpy`, `google-genai`, `google-cloud-storage`, `requests`
+- **FFmpeg / ffprobe** with `loudnorm`; VideoToolbox is used when available, with software encoding fallback.
+- **Python 3.10+** (3.11 or 3.12 recommended), a virtual environment and dependencies from the repository root `requirements.txt`. Windows installation and NLE import remain unverified.
 - **Cloud Credentials (100% ADC + Vertex AI & GCS)**:
   - Authenticate via `gcloud auth application-default login`
-  - Run `./setup.sh` once to automatically provision the GCS bucket (`gs://multicam-video-${GOOGLE_CLOUD_PROJECT}`), two-tier Lifecycle auto-cleanup rules (`raw/` staging: 2 days; `output/`, `deliverables/`, `multicam_assets/` deliverables: 15 days), Vertex AI Service Agent IAM (`roles/storage.objectUser`), and `.env` configuration.
+  - Team handoff: use `GOOGLE_CLOUD_PROJECT=panmedia-internal-ge`, `GOOGLE_CLOUD_LOCATION=global`, `GCS_BUCKET=panmedia-test-488409-agent-staging` and `gcloud auth application-default set-quota-project panmedia-internal-ge`. See [installation guide](../../docs/INSTALL.zh-TW.md).
+  - Authorized team members use the existing resources. Do not run `setup.sh` during workstation installation; it changes cloud resources, IAM and lifecycle policies. It is only for administrators explicitly provisioning a separate environment.
+  - Install from `https://github.com/a0359627/multicam-video-preprocessing`, branch `feat/gemini-3.8-test-c-workflow`. Upstream author credit remains sylphlin. Never copy another user's ADC, tokens or secret files.
 
 ---
 
@@ -31,7 +34,7 @@ Universal end-to-end toolkit for multi-camera video production (2 to 6 Cameras),
 | Step | Script | Core Module (`scripts/modules/`) | Function |
 | :--- | :--- | :--- | :--- |
 | **Step 1** | `scripts/multicam_pipeline.py` | `audio_sync.py`, `audio_normalizer.py`, `video_composer.py` | MFCC Acoustic Sync + Subframe Refinement (0.125ms), EBU R128 (-14 LUFS), Synced Masters, Multi-in-One Full Grid (`multicam_merged_full.mp4`) |
-| **Step 2** | `scripts/generate_edl.py` | `llm_client.py`, `gcp_client.py`, `progress.py`, `edl_validator.py`, `assets/edl_interview_template.md` | Vertex AI Gemini 3.8 Flash Agentic Video Understanding (ADC + GCS `gs://` URI) + EDL Validation -> `edl_full.csv` + Report |
+| **Step 2** | `scripts/generate_edl.py` | `llm_client.py`, `gcp_client.py`, `progress.py`, `edl_validator.py`, `assets/prompt_c_portable.md` | Vertex AI Gemini 3.8 Flash Agentic Video Understanding (ADC + GCS `gs://` URI) + EDL Validation -> `edl_full.csv` + Report |
 | **Step 3A** | `scripts/export_fcp7_xml.py` | `reporter.py`, `time_utils.py`, `edl_validator.py` | Full-length EDL CSV -> FCP7 XML (`final_cut_full.xml`) for DaVinci / Premiere (EDL validation, NTSC float fps & drop-frame support) |
 | **Step 3B** | `scripts/edl_to_video.py` | `video_composer.py`, `edl_validator.py` | Hardware-accelerated clip cutting directly from synced masters -> `final_cut_full.mp4` (with EDL validation) |
 
@@ -50,11 +53,18 @@ Universal end-to-end toolkit for multi-camera video production (2 to 6 Cameras),
 5. **Universal Pre-roll & Countdown Elimination (Zero-Tolerance & Asymmetric Safety Margin)**:
    - Systematically purges all on-set countdown noises ("5, 4, 3, 2, 1", "五四三二", "Ready Action") and pre-roll clutter. Enforces asymmetric safety margins where the start point is self-verified on the `[Start, Start+2s]` window to guarantee the opening frame aligns cleanly with the speaker's true opening word.
 6. **100% Pure Vertex AI (ADC) & GCS Cloud Architecture (Zero AI Studio Keys)**:
-   - All model calls and multimodal media ingestion run exclusively on **Google Cloud Vertex AI** (`GOOGLE_CLOUD_LOCATION=global`) authenticated via Application Default Credentials (`gcloud auth application-default login`). Media assets are staged to **Google Cloud Storage** (`gs://multicam-video-${PROJECT_ID}/raw/`) with SHA-256 hash caching (avoiding redundant large video uploads on same-day re-runs), a 2-day GCS Bucket Lifecycle auto-deletion policy, and optional `--cleanup-gcs` immediate cleanup.
+   - All model calls and multimodal media ingestion run exclusively on **Google Cloud Vertex AI** (`GOOGLE_CLOUD_LOCATION=global`) authenticated via Application Default Credentials (`gcloud auth application-default login`). Media assets are staged to **Google Cloud Storage** (`gs://<GCS_BUCKET>/raw/<job UUID>/<filename>`) with job-scoped upload reuse. Internal retries reuse that job's object; a new invocation creates a new upload path. `--cleanup-gcs` only deletes objects uploaded by the current job and never deletes directly supplied `gs://` inputs. Lifecycle retention remains 2 days for `raw/` and 15 days for `output/`, `deliverables/`, `multicam_assets/`.
 7. **Deterministic EDL Semantic Validation & `--strict-edl` Safeguard**:
    - Pre-flight semantic validation covering 8 structural dimensions across 3 execution points (before disk write in `generate_edl.py`, and on EDL loading in `export_fcp7_xml.py` and `edl_to_video.py`). Evaluates 6 critical ERRORs (`E_NO_ROWS`, `E_PARSE_TIME`, `E_NEGATIVE_DURATION`, `E_NON_MONOTONIC`, `E_OVERLAP`, `E_EMPTY_CAMERA`) and 2 WARNs (`W_UNKNOWN_CAMERA`, `W_GAP`). Passing `--strict-edl` halts execution with exit code 1 on ERROR (default warns and continues; `generate_edl.py` always writes bad data to disk before exit for post-mortem inspection). Supports report localization via `--lang` (built-in `en` and `zh-TW`, with silent fallback to `en`), customizable gap threshold via `--edl-max-gap-sec` (default: `0.05`), and camera whitelist via `--edl-known-cameras` (defaults to `^CAM\d+$` regex in generator, auto-inferred from media directory in exporter/renderer).
 
 ---
+
+## Portable Audio and Editing Defaults
+
+- External master audio is optional: Stage 1 `--master-audio <WAV_OR_OBS_MKV>` aligns it acoustically to the reference camera and records offset, confidence and coverage in `multicam_sync.json`. Low-confidence alignment or insufficient required coverage stops the job. Do not reuse benchmark offsets or infer offsets from file modification times.
+- Without a master, both XML and MP4 use synchronized camera audio. Grid and MP4 use a continuous equal `1/N` mix, independent of picture cuts. XML keeps separate camera audio tracks with matching gains for the editor to adjust. Two stereo cameras produce four camera tracks without a master, or six tracks with a stereo master (master enabled, camera tracks retained but disabled). Mono sources retain their actual channel count.
+- Sources need common recorded sound for acoustic synchronization. Use `--strict-sync` and a new output directory per recording. Read media properties from this job; do not assume a fixed frame rate, resolution or path.
+- Default `assets/prompt_c_portable.md` carries Test C natural editing rhythm with no old speaker identities or transcript. Historical `prompt_c_natural_rhythm.md` and `scripts/benchmarks/interview_test_c/` are reference material, not the portable entry point. Keep full-length analysis and the existing three-stage sequence.
 
 ## 3-Stage Gated Execution Runbook
 
@@ -78,17 +88,22 @@ flowchart TD
   # Local Camera Files or Google Drive File Links:
   python3 "${SKILL_DIR}/scripts/multicam_pipeline.py" \
     --ref <CAM1.mp4_OR_GDRIVE_LINK> --targets <CAM2.mp4_OR_GDRIVE_LINK...> \
-    --normalize --merge -o <OUTPUT_DIR>
+    --normalize --merge --strict-sync -o <OUTPUT_DIR>
+
+  # Optional external master: add --master-audio <WAV_OR_OBS_MKV> above.
+  # Omit it for camera-only audio; OBS is not required.
 
   # Or Direct Google Drive Folder URL / Folder ID (Auto-discovers & sorts CAM1..CAMn via ADC):
   python3 "${SKILL_DIR}/scripts/multicam_pipeline.py" \
     --gdrive-folder "<GDRIVE_FOLDER_URL_OR_ID>" \
-    --normalize --merge -o <OUTPUT_DIR>
+    --normalize --merge --strict-sync -o <OUTPUT_DIR>
   ```
 - **Exit Gate 1 Verification (Mandatory before Stage 2)**:
   - `<OUTPUT_DIR>/multicam_sync.json` exists with valid offset data.
-  - `<OUTPUT_DIR>/<CAM>_synced.mp4` full-length synchronized masters exist for all cameras.
+  - All camera masters listed by `cameras[].synced_path` in the sync JSON exist and are non-empty; filenames retain the input stem/extension and need not start with `CAM`.
   - `<OUTPUT_DIR>/multicam_merged_full.mp4` grid video exists and is non-empty.
+  - If a master was supplied, its measured alignment and valid coverage are recorded and the referenced master file exists and is readable. Stop on master alignment/coverage failure.
+  - Without a master, verify the synchronized camera audio is present for both XML and MP4 delivery.
 
 ### Stage 2: Gemini AI Multimodal Rough-Cut (Agentic Video EDL Generation)
 - **User Status Update**: `"正在進行 Agentic Video AI 鏡頭剪輯分析..."` (localized to user's language)
@@ -113,6 +128,7 @@ flowchart TD
   ```
 - **Exit Gate 3A Verification**:
   - `<OUTPUT_DIR>/final_cut_full.xml` exists and size $> 0\text{ bytes}$.
+  - Verify linked media, independently editable audio tracks and beginning/middle/end sync in the intended NLE. A file-existence check does not establish editorial acceptance.
 
 ### Stage 3B: Direct Video Rendering (Secondary Fast Preview Path / 10% Use Case)
 - **User Status Update**: `"正在渲染影片成片..."` (localized to user's language)
@@ -123,4 +139,5 @@ flowchart TD
     -o <OUTPUT_DIR>/final_cut_full.mp4 --strict-edl --lang <zh-TW|en>
   ```
 - **Exit Gate 3B Verification**:
-  - `<OUTPUT_DIR>/final_cut_full.mp4` exists with duration $> 0$.
+  - `<OUTPUT_DIR>/final_cut_full.mp4` exists with duration $> 0$ and an audible audio stream.
+  - Listen at beginning/middle/end and picture-cut boundaries; distinguish successful rendering from human acceptance.

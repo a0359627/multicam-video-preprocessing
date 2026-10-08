@@ -2,7 +2,7 @@
 Google Cloud Platform (GCP) ADC & GCS Client Module.
 Provides 100% Application Default Credentials (ADC) integration,
 GCS bucket auto-discovery/provisioning with 2-day lifecycle auto-cleanup,
-SHA-256 hash-based upload caching, and ephemeral blob cleanup.
+Job-scoped SHA-256 upload caching, and generation-guarded ephemeral cleanup.
 """
 
 import hashlib
@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+import uuid
 from urllib.parse import urlparse
 
 try:
@@ -213,14 +214,46 @@ def ensure_gcs_bucket(bucket_name, project=None, region="us-central1"):
     return bucket
 
 
-def upload_file_to_gcs_with_cache(local_path, bucket_name, gcs_prefix="raw", project=None, region="us-central1", force_upload=False, extra_metadata=None):
+class GcsStagingJob:
+    """Own one invocation's staging namespace and exact uploaded generations.
+
+    Keep this object for retries within a job. A new invocation gets a new UUID,
+    so separate jobs never share remote cache entries or cleanup ownership.
     """
-    Upload a local media file to GCS with SHA-256 hash-based caching:
+
+    def __init__(self):
+        self.job_id = uuid.uuid4().hex
+        self._owned_generations = {}
+
+    def blob_name(self, prefix, file_name):
+        parts = (prefix or "raw").strip("/").split("/")
+        return "/".join(parts[:1] + [self.job_id] + parts[1:] + [file_name])
+
+    def generation_for(self, uri):
+        return self._owned_generations.get(uri)
+
+    def record_upload(self, uri, generation):
+        # Only trust the successful upload response, never adopt a blob found
+        # by reload: it might have been created or replaced by another writer.
+        if generation is None or int(generation) <= 0:
+            raise RuntimeError("GCS upload returned no generation; leaving the object for lifecycle cleanup.")
+        self._owned_generations[uri] = int(generation)
+
+    def cleanup(self, project=None):
+        for uri in tuple(self._owned_generations):
+            delete_gcs_blob(uri, project=project, staging_job=self)
+
+
+def upload_file_to_gcs_with_cache(local_path, bucket_name, gcs_prefix="raw", project=None, region="us-central1", force_upload=False, extra_metadata=None, staging_job=None):
+    """
+    Upload a local media file to an invocation-specific GCS namespace:
     1. Computes local file SHA-256 and size.
-    2. Checks if a blob with matching name and SHA-256 already exists on GCS (unless force_upload=True).
+    2. Reuses matching content only when this job owns the exact generation.
     3. If cache hits: skips upload and immediately returns gs://bucket/path.
     4. If cache misses: executes resumable chunked upload with explicit MIME content_type and metadata.
-    Returns: "gs://<bucket_name>/<blob_name>"
+    Pass the same GcsStagingJob for retries and owned cleanup. Without one,
+    this upload gets a fresh namespace and is left for lifecycle cleanup.
+    Returns: "gs://<bucket_name>/<prefix>/<job_uuid>/<blob_name>"
     """
     if not os.path.exists(local_path):
         raise FileNotFoundError(f"Local file not found: {local_path}")
@@ -229,7 +262,10 @@ def upload_file_to_gcs_with_cache(local_path, bucket_name, gcs_prefix="raw", pro
     file_size = os.path.getsize(local_path)
     file_size_mb = file_size / (1024 * 1024)
     file_name = fix_mojibake_filename(os.path.basename(local_path))
-    blob_name = f"{gcs_prefix.strip('/')}/{file_name}" if gcs_prefix else file_name
+    staging_job = staging_job or GcsStagingJob()
+    blob_name = staging_job.blob_name(gcs_prefix, file_name)
+    gcs_uri = f"gs://{bucket_name}/{blob_name}"
+    owned_generation = staging_job.generation_for(gcs_uri)
     mime_type = guess_mime_type(local_path)
 
     ensure_gcs_bucket(bucket_name, project=project, region=region)
@@ -244,15 +280,16 @@ def upload_file_to_gcs_with_cache(local_path, bucket_name, gcs_prefix="raw", pro
     local_hash = compute_file_sha256(local_path)
 
     # Step 2: Check remote blob metadata
-    if not force_upload:
+    if not force_upload and owned_generation is not None:
         try:
             blob.reload()
             remote_hash = (blob.metadata or {}).get("sha256")
             remote_size = blob.size
-            if remote_size == file_size and remote_hash == local_hash:
+            if (blob.generation == owned_generation and remote_size == file_size
+                    and remote_hash == local_hash):
                 duration = time.time() - t0
                 print(f"  ✓ [Cache Hit] Remote gs://{bucket_name}/{blob_name} is identical (SHA-256 matched, verified in {duration:.1f}s). Skipping upload!")
-                return f"gs://{bucket_name}/{blob_name}"
+                return gcs_uri
         except Exception:
             # Blob does not exist or metadata unreadable, proceed to upload
             pass
@@ -264,18 +301,23 @@ def upload_file_to_gcs_with_cache(local_path, bucket_name, gcs_prefix="raw", pro
 
     try:
         blob.content_type = mime_type
-        meta = {"sha256": local_hash, "original_filename": file_name}
+        meta = {}
         if isinstance(extra_metadata, dict):
             for k, v in extra_metadata.items():
                 if v is not None:
                     meta[str(k)] = str(v)
+        meta.update(sha256=local_hash, original_filename=file_name, staging_job=staging_job.job_id)
         blob.metadata = meta
         blob.chunk_size = 16 * 1024 * 1024  # 16MB chunks
-        blob.upload_from_filename(local_path, content_type=mime_type, timeout=effective_timeout)
+        blob.upload_from_filename(
+            local_path, content_type=mime_type, timeout=effective_timeout,
+            if_generation_match=owned_generation if owned_generation is not None else 0,
+        )
+        staging_job.record_upload(gcs_uri, blob.generation)
         up_duration = time.time() - t_up_start
         speed_mbps = file_size_mb / max(0.1, up_duration) * 8
         print(f"  ✓ Uploaded to gs://{bucket_name}/{blob_name} in {up_duration:.1f}s ({speed_mbps:.1f} Mbps)")
-        return f"gs://{bucket_name}/{blob_name}"
+        return gcs_uri
     except Exception as exc:
         err_msg = str(exc)
         if "403" in err_msg or "Forbidden" in err_msg or "AccessDeniedException" in err_msg:
@@ -308,22 +350,28 @@ def upload_file_to_gcs_with_cache(local_path, bucket_name, gcs_prefix="raw", pro
         raise RuntimeError(f"GCS upload failed for {local_path} -> gs://{bucket_name}/{blob_name}: {exc}")
 
 
-def delete_gcs_blob(gcs_uri, project=None):
+def delete_gcs_blob(gcs_uri, project=None, staging_job=None):
     """
-    Delete a blob from GCS by its gs:// URI.
-    Used when --cleanup-gcs is passed or for cleaning up ephemeral audio chunks after inference.
+    Delete only a generation uploaded by this job; a bare URI is never owned.
+    A generation precondition prevents deleting a subsequent replacement.
     """
     if not gcs_uri or not str(gcs_uri).startswith("gs://"):
-        return
+        return False
+    generation = staging_job.generation_for(gcs_uri) if staging_job is not None else None
+    if generation is None:
+        return False
     try:
         bucket_name, blob_name = parse_gcs_uri(gcs_uri)
         client = get_gcs_storage_client(project=project)
         bucket = client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
-        blob.delete()
+        blob.delete(if_generation_match=generation)
+        staging_job._owned_generations.pop(gcs_uri, None)
         print(f"  ✓ [GCS Cleanup] Deleted remote blob: {gcs_uri}")
-    except Exception:
-        pass
+        return True
+    except Exception as exc:
+        print(f"  [GCS Cleanup] Could not delete owned generation {generation}: {exc}", file=sys.stderr)
+        return False
 
 
 # ==============================================================================
@@ -835,11 +883,11 @@ def download_gdrive_file_with_cache(url_or_id, dest_dir, project=None, force_dow
     return local_path
 
 
-def transfer_gdrive_to_gcs_with_cache(url_or_id, bucket_name, gcs_prefix="raw", project=None, region="us-central1", local_cache_dir=None, force_upload=False):
+def transfer_gdrive_to_gcs_with_cache(url_or_id, bucket_name, gcs_prefix="raw", project=None, region="us-central1", local_cache_dir=None, force_upload=False, staging_job=None):
     """
-    Ensure a Google Drive file is staged in GCS (`gs://<bucket_name>/<gcs_prefix>/<name>`):
+    Stage a Google Drive file in the same isolated namespace as local uploads:
     1. Queries Google Drive metadata (`id`, `name`, `size`, `md5Checksum`).
-    2. Checks if the target GCS blob already exists with matching `size` and `gdrive_md5`.
+    2. Checks this job's owned generation for matching `size` and `gdrive_md5`.
        If matched -> returns `gs://...` immediately with ZERO download and ZERO upload!
     3. Otherwise -> downloads via `download_gdrive_file_with_cache` and uploads to GCS with `gdrive_md5` metadata.
     Returns: ("gs://<bucket>/<blob>", "<local_cached_path>")
@@ -851,18 +899,22 @@ def transfer_gdrive_to_gcs_with_cache(url_or_id, bucket_name, gcs_prefix="raw", 
     expected_md5 = meta.get("md5Checksum")
 
     bucket_name = bucket_name.replace("gs://", "").strip("/")
-    blob_name = f"{gcs_prefix.strip('/')}/{file_name}" if gcs_prefix else file_name
+    staging_job = staging_job or GcsStagingJob()
+    blob_name = staging_job.blob_name(gcs_prefix, file_name)
+    gcs_uri = f"gs://{bucket_name}/{blob_name}"
+    owned_generation = staging_job.generation_for(gcs_uri)
 
     ensure_gcs_bucket(bucket_name, project=project, region=region)
     client = get_gcs_storage_client(project=project)
     bucket = client.bucket(bucket_name)
     blob = bucket.blob(blob_name)
 
-    if not force_upload and expected_md5:
+    if not force_upload and expected_md5 and owned_generation is not None:
         try:
             blob.reload()
             remote_meta = blob.metadata or {}
-            if blob.size == expected_size and remote_meta.get("gdrive_md5") == expected_md5:
+            if (blob.generation == owned_generation and blob.size == expected_size
+                    and remote_meta.get("gdrive_md5") == expected_md5):
                 print(
                     f"  ✓ [GDrive -> GCS Cache Hit] gs://{bucket_name}/{blob_name} already matches Google Drive "
                     f"(MD5: {expected_md5[:12]}...). Zero transfer needed!"
@@ -884,6 +936,7 @@ def transfer_gdrive_to_gcs_with_cache(url_or_id, bucket_name, gcs_prefix="raw", 
         region=region,
         force_upload=force_upload,
         extra_metadata={"gdrive_id": file_id, "gdrive_md5": expected_md5},
+        staging_job=staging_job,
     )
     return gcs_uri, local_path
 
@@ -932,4 +985,3 @@ def resolve_multicam_gdrive_inputs(ref=None, targets=None, gdrive_folder=None, o
             resolved_targets.append(t)
 
     return resolved_ref, resolved_targets
-
